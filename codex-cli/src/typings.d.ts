@@ -63,3 +63,13 @@ declare module "diff" {
     options?: { context?: number },
   ): string;
 }
+
+// Allow custom environment variable CODEX_DEV_DIR without TS errors
+declare namespace NodeJS {
+  interface ProcessEnv {
+    /**
+     * If set, change working directory on startup (development only)
+     */
+    CODEX_DEV_DIR?: string;
+  }
+}
