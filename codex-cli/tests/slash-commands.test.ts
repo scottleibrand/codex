@@ -11,6 +11,8 @@ test("SLASH_COMMANDS includes expected commands", () => {
   expect(commands).toContain("/approval");
   expect(commands).toContain("/clearhistory");
   expect(commands).toContain("/diff");
+  // ensure flex-mode command remains available
+  expect(commands).toContain("/flex-mode");
 });
 
 test("filters slash commands by prefix", () => {
