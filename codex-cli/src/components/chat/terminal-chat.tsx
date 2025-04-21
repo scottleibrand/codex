@@ -5,7 +5,7 @@ import type { ColorName } from "chalk";
 import type { ResponseItem } from "openai/resources/responses/responses.mjs";
 
 import TerminalChatInput from "./terminal-chat-input.js";
-import { TerminalChatToolCallCommand } from "./terminal-chat-tool-call-item.js";
+import { TerminalChatToolCallCommand } from "./terminal-chat-tool-call-command.js";
 import {
   calculateContextPercentRemaining,
   uniqueById,
@@ -15,24 +15,35 @@ import { formatCommandForDisplay } from "../../format-command.js";
 import { useConfirmation } from "../../hooks/use-confirmation.js";
 import { useTerminalSize } from "../../hooks/use-terminal-size.js";
 import { AgentLoop } from "../../utils/agent/agent-loop.js";
-import { isLoggingEnabled, log } from "../../utils/agent/log.js";
+import { log } from "../../utils/agent/log.js";
 import { ReviewDecision } from "../../utils/agent/review.js";
 import { generateCompactSummary } from "../../utils/compact-summary.js";
 import { OPENAI_BASE_URL } from "../../utils/config.js";
+import { extractAppliedPatches as _extractAppliedPatches } from "../../utils/extract-applied-patches.js";
+import { getGitDiff } from "../../utils/get-diff.js";
 import { createInputItem } from "../../utils/input-utils.js";
 import { getAvailableModels } from "../../utils/model-utils.js";
 import { CLI_VERSION } from "../../utils/session.js";
 import { shortCwd } from "../../utils/short-path.js";
 import { saveRollout } from "../../utils/storage/save-rollout.js";
 import ApprovalModeOverlay from "../approval-mode-overlay.js";
+import DiffOverlay from "../diff-overlay.js";
 import HelpOverlay from "../help-overlay.js";
 import HistoryOverlay from "../history-overlay.js";
 import ModelOverlay from "../model-overlay.js";
 import { Box, Text } from "ink";
-import { exec } from "node:child_process";
+import { spawn } from "node:child_process";
 import OpenAI from "openai";
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { inspect } from "util";
+
+export type OverlayModeType =
+  | "none"
+  | "history"
+  | "model"
+  | "approval"
+  | "help"
+  | "diff";
 
 type Props = {
   config: AppConfig;
@@ -179,9 +190,14 @@ export default function TerminalChat({
     explanation,
     submitConfirmation,
   } = useConfirmation();
-  const [overlayMode, setOverlayMode] = useState<
-    "none" | "history" | "model" | "approval" | "help"
-  >("none");
+  const [overlayMode, setOverlayMode] = useState<OverlayModeType>("none");
+
+  // Store the diff text when opening the diff overlay so the view isn’t
+  // recomputed on every re‑render while it is open.
+  // diffText is passed down to the DiffOverlay component. The setter is
+  // currently unused but retained for potential future updates. Prefix with
+  // an underscore so eslint ignores the unused variable.
+  const [diffText, _setDiffText] = useState<string>("");
 
   const [initialPrompt, setInitialPrompt] = useState(_initialPrompt);
   const [initialImagePaths, setInitialImagePaths] =
@@ -197,23 +213,25 @@ export default function TerminalChat({
   // ────────────────────────────────────────────────────────────────
   // DEBUG: log every render w/ key bits of state
   // ────────────────────────────────────────────────────────────────
-  if (isLoggingEnabled()) {
-    log(
-      `render – agent? ${Boolean(agentRef.current)} loading=${loading} items=${
-        items.length
-      }`,
-    );
-  }
+  log(
+    `render – agent? ${Boolean(agentRef.current)} loading=${loading} items=${
+      items.length
+    }`,
+  );
 
   useEffect(() => {
-    if (isLoggingEnabled()) {
-      log("creating NEW AgentLoop");
-      log(
-        `model=${model} instructions=${Boolean(
-          config.instructions,
-        )} approvalPolicy=${approvalPolicy}`,
-      );
+    // Skip recreating the agent if awaiting a decision on a pending confirmation
+    if (confirmationPrompt != null) {
+      log("skip AgentLoop recreation due to pending confirmationPrompt");
+      return;
     }
+
+    log("creating NEW AgentLoop");
+    log(
+      `model=${model} instructions=${Boolean(
+        config.instructions,
+      )} approvalPolicy=${approvalPolicy}`,
+    );
 
     // Tear down any existing loop before creating a new one
     agentRef.current?.terminate();
@@ -281,25 +299,18 @@ export default function TerminalChat({
     // force a render so JSX below can "see" the freshly created agent
     forceUpdate();
 
-    if (isLoggingEnabled()) {
-      log(`AgentLoop created: ${inspect(agentRef.current, { depth: 1 })}`);
-    }
+    log(`AgentLoop created: ${inspect(agentRef.current, { depth: 1 })}`);
 
     return () => {
-      if (isLoggingEnabled()) {
-        log("terminating AgentLoop");
-      }
+      log("terminating AgentLoop");
       agentRef.current?.terminate();
       agentRef.current = undefined;
       forceUpdate(); // re‑render after teardown too
     };
-  }, [
-    model,
-    config,
-    approvalPolicy,
-    requestConfirmation,
-    additionalWritableRoots,
-  ]);
+    // We intentionally omit 'approvalPolicy' and 'confirmationPrompt' from the deps
+    // so switching modes or showing confirmation dialogs doesn’t tear down the loop.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [model, config, requestConfirmation, additionalWritableRoots]);
 
   // whenever loading starts/stops, reset or start a timer — but pause the
   // timer while a confirmation overlay is displayed so we don't trigger a
@@ -360,9 +371,10 @@ export default function TerminalChat({
           const safePreview = preview.replace(/"/g, '\\"');
           const title = "Codex CLI";
           const cwd = PWD;
-          exec(
-            `osascript -e 'display notification "${safePreview}" with title "${title}" subtitle "${cwd}" sound name "Ping"'`,
-          );
+          spawn("osascript", [
+            "-e",
+            `display notification "${safePreview}" with title "${title}" subtitle "${cwd}" sound name "Ping"`,
+          ]);
         }
       }
     }
@@ -372,9 +384,7 @@ export default function TerminalChat({
   // Let's also track whenever the ref becomes available
   const agent = agentRef.current;
   useEffect(() => {
-    if (isLoggingEnabled()) {
-      log(`agentRef.current is now ${Boolean(agent)}`);
-    }
+    log(`agentRef.current is now ${Boolean(agent)}`);
   }, [agent]);
 
   // ---------------------------------------------------------------------
@@ -446,6 +456,7 @@ export default function TerminalChat({
       <Box flexDirection="column">
         {agent ? (
           <TerminalMessageHistory
+            setOverlayMode={setOverlayMode}
             batch={lastMessageBatch}
             groupCounts={groupCounts}
             items={items}
@@ -493,17 +504,35 @@ export default function TerminalChat({
             openModelOverlay={() => setOverlayMode("model")}
             openApprovalOverlay={() => setOverlayMode("approval")}
             openHelpOverlay={() => setOverlayMode("help")}
+            openDiffOverlay={() => {
+              const { isGitRepo, diff } = getGitDiff();
+              let text: string;
+              if (isGitRepo) {
+                text = diff;
+              } else {
+                text = "`/diff` — _not inside a git repository_";
+              }
+              setItems((prev) => [
+                ...prev,
+                {
+                  id: `diff-${Date.now()}`,
+                  type: "message",
+                  role: "system",
+                  content: [{ type: "input_text", text }],
+                },
+              ]);
+              // Ensure no overlay is shown.
+              setOverlayMode("none");
+            }}
             onCompact={handleCompact}
             active={overlayMode === "none"}
             interruptAgent={() => {
               if (!agent) {
                 return;
               }
-              if (isLoggingEnabled()) {
-                log(
-                  "TerminalChat: interruptAgent invoked – calling agent.cancel()",
-                );
-              }
+              log(
+                "TerminalChat: interruptAgent invoked – calling agent.cancel()",
+              );
               agent.cancel();
               setLoading(false);
 
@@ -539,13 +568,11 @@ export default function TerminalChat({
             currentModel={model}
             hasLastResponse={Boolean(lastResponseId)}
             onSelect={(newModel) => {
-              if (isLoggingEnabled()) {
-                log(
-                  "TerminalChat: interruptAgent invoked – calling agent.cancel()",
-                );
-                if (!agent) {
-                  log("TerminalChat: agent is not ready yet");
-                }
+              log(
+                "TerminalChat: interruptAgent invoked – calling agent.cancel()",
+              );
+              if (!agent) {
+                log("TerminalChat: agent is not ready yet");
               }
               agent?.cancel();
               setLoading(false);
@@ -580,12 +607,20 @@ export default function TerminalChat({
           <ApprovalModeOverlay
             currentMode={approvalPolicy}
             onSelect={(newMode) => {
-              agent?.cancel();
-              setLoading(false);
+              // update approval policy without cancelling an in-progress session
               if (newMode === approvalPolicy) {
                 return;
               }
+              // update state
               setApprovalPolicy(newMode as ApprovalPolicy);
+              // update existing AgentLoop instance
+              if (agentRef.current) {
+                (
+                  agentRef.current as unknown as {
+                    approvalPolicy: ApprovalPolicy;
+                  }
+                ).approvalPolicy = newMode as ApprovalPolicy;
+              }
               setItems((prev) => [
                 ...prev,
                 {
@@ -609,6 +644,13 @@ export default function TerminalChat({
 
         {overlayMode === "help" && (
           <HelpOverlay onExit={() => setOverlayMode("none")} />
+        )}
+
+        {overlayMode === "diff" && (
+          <DiffOverlay
+            diffText={diffText}
+            onExit={() => setOverlayMode("none")}
+          />
         )}
       </Box>
     </Box>

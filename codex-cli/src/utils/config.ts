@@ -8,7 +8,7 @@
 
 import type { FullAutoErrorMode } from "./auto-approval-mode.js";
 
-import { log, isLoggingEnabled } from "./agent/log.js";
+import { log } from "./agent/log.js";
 import { AutoApprovalMode } from "./auto-approval-mode.js";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "fs";
 import { load as loadYaml, dump as dumpYaml } from "js-yaml";
@@ -77,6 +77,7 @@ export type AppConfig = {
   apiKey?: string;
   model: string;
   instructions: string;
+  approvalMode?: AutoApprovalMode;
   fullAutoErrorMode?: FullAutoErrorMode;
   memory?: MemoryConfig;
   /** Whether to enable desktop notifications for responses */
@@ -244,15 +245,11 @@ export const loadConfig = (
       ? resolvePath(cwd, options.projectDocPath)
       : discoverProjectDocPath(cwd);
     if (projectDocPath) {
-      if (isLoggingEnabled()) {
-        log(
-          `[codex] Loaded project doc from ${projectDocPath} (${projectDoc.length} bytes)`,
-        );
-      }
+      log(
+        `[codex] Loaded project doc from ${projectDocPath} (${projectDoc.length} bytes)`,
+      );
     } else {
-      if (isLoggingEnabled()) {
-        log(`[codex] No project doc found in ${cwd}`);
-      }
+      log(`[codex] No project doc found in ${cwd}`);
     }
   }
 
@@ -275,6 +272,7 @@ export const loadConfig = (
         : DEFAULT_AGENTIC_MODEL),
     instructions: combinedInstructions,
     notify: storedConfig.notify === true,
+    approvalMode: storedConfig.approvalMode,
     safeCommands: storedConfig.safeCommands ?? [],
   };
 
@@ -391,6 +389,7 @@ export const saveConfig = (
   // Create the config object to save
   const configToSave: StoredConfig = {
     model: config.model,
+    approvalMode: config.approvalMode,
   };
 
   // Add history settings if they exist
