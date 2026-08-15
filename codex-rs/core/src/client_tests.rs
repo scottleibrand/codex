@@ -329,6 +329,12 @@ fn mantle_gpt_5_6_requests_mark_stable_and_recent_history_for_caching() -> anyho
                 output: FunctionCallOutputPayload::from_text("tool output".to_string()),
                 internal_chat_message_metadata_passthrough: None,
             },
+            ResponseItem::FunctionCallOutput {
+                id: None,
+                call_id: "call-2".to_string(),
+                output: FunctionCallOutputPayload::from_text("second tool output".to_string()),
+                internal_chat_message_metadata_passthrough: None,
+            },
         ],
         base_instructions: BaseInstructions {
             text: "stable developer instructions".to_string(),
@@ -376,11 +382,15 @@ fn mantle_gpt_5_6_requests_mark_stable_and_recent_history_for_caching() -> anyho
             serde_json::json!({"mode": "explicit"})
         );
     }
+    assert_eq!(wire_request["input"][3]["output"], "tool output");
     assert_eq!(
-        wire_request["input"][3]["output"][0]["prompt_cache_breakpoint"],
+        wire_request["input"][4]["output"][0]["prompt_cache_breakpoint"],
         serde_json::json!({"mode": "explicit"})
     );
-    assert_eq!(wire_request["input"][3]["output"][0]["text"], "tool output");
+    assert_eq!(
+        wire_request["input"][4]["output"][0]["text"],
+        "second tool output"
+    );
     Ok(())
 }
 

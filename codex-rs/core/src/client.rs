@@ -931,24 +931,35 @@ impl ModelClient {
             .as_ref()
             .is_some_and(|options| options.mode == PromptCacheMode::Explicit)
         {
-            prompt_cache_breakpoints.extend(
-                input
+            let is_cacheable_item = |item: &ResponseItem| match item {
+                ResponseItem::Message { content, .. } => content
                     .iter()
-                    .enumerate()
-                    .rev()
-                    .filter_map(|(index, item)| match item {
-                        ResponseItem::Message { content, .. }
-                            if content
-                                .iter()
-                                .any(|block| matches!(block, ContentItem::InputText { .. })) =>
-                        {
-                            Some(index)
-                        }
-                        ResponseItem::FunctionCallOutput { .. } => Some(index),
-                        _ => None,
-                    })
-                    .take(2),
-            );
+                    .any(|block| matches!(block, ContentItem::InputText { .. })),
+                ResponseItem::FunctionCallOutput { .. } => true,
+                _ => false,
+            };
+            if let Some(latest_index) = input.iter().rposition(is_cacheable_item) {
+                prompt_cache_breakpoints.push(latest_index);
+
+                // Preserve the checkpoint from the preceding request as well as
+                // adding one after the newest tool-output batch. Selecting the
+                // last two outputs would move both checkpoints at once whenever
+                // parallel tools return, forcing Bedrock to rewrite all history
+                // after the fixed developer prefix.
+                let previous_search_end =
+                    if matches!(input[latest_index], ResponseItem::FunctionCallOutput { .. }) {
+                        input[..=latest_index].iter().rposition(|item| {
+                            !matches!(item, ResponseItem::FunctionCallOutput { .. })
+                        })
+                    } else {
+                        latest_index.checked_sub(1)
+                    };
+                if let Some(previous_index) = previous_search_end
+                    .and_then(|end| input[..=end].iter().rposition(is_cacheable_item))
+                {
+                    prompt_cache_breakpoints.push(previous_index);
+                }
+            }
             prompt_cache_breakpoints.sort_unstable();
             prompt_cache_breakpoints.dedup();
         }
