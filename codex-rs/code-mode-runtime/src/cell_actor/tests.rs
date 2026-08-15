@@ -137,6 +137,7 @@ fn spawn_cell_actor_harness_with_host_and_failure_handler<H: CellHost>(
     let cell_state = Arc::new(CellState::new(CancellationToken::new()));
     let handle = CellHandle::new(command_tx, Arc::clone(&cell_state));
     let task = tokio::spawn(run_cell(
+        CellId::new("test-cell"),
         host,
         CellContext {
             runtime_tx,

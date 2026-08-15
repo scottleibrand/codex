@@ -1,5 +1,6 @@
 use std::sync::Arc;
 use std::time::Duration;
+use std::time::Instant;
 
 use codex_code_mode_protocol::CellId;
 use codex_code_mode_protocol::CodeModeNestedToolCall;
@@ -88,12 +89,22 @@ impl InProcessCodeModeSession {
         let response_cell_id = cell_id.clone();
         let (response_tx, response_rx) = oneshot::channel();
         tokio::spawn(async move {
+            let started_at = Instant::now();
             let response = started
                 .initial_event()
                 .await
                 .map_err(|error| error.to_string())
                 .and_then(|event| runtime_response(&response_cell_id, event));
-            let _ = response_tx.send(response);
+            let result_class = if response.is_ok() { "success" } else { "error" };
+            let receiver_open = response_tx.send(response).is_ok();
+            tracing::info!(
+                target: "codex_code_mode_runtime::lifecycle",
+                cell_id = %response_cell_id,
+                result_class,
+                receiver_open,
+                elapsed_ms = elapsed_millis(started_at),
+                "code_mode_service_response_enqueued"
+            );
         });
         Ok(StartedCell::from_result_receiver(cell_id, response_rx))
     }
@@ -139,15 +150,27 @@ impl InProcessCodeModeSession {
             )
             .await
         {
-            Ok(pending_event) => Box::pin(async move {
-                match pending_event.event().await {
-                    Ok(event) => Ok(WaitOutcome::LiveCell(runtime_response(&cell_id, event)?)),
-                    Err(runtime::Error::MissingCell(_) | runtime::Error::ClosedCell(_)) => {
-                        Ok(WaitOutcome::MissingCell(missing_cell_response(cell_id)))
-                    }
-                    Err(error) => Err(error.to_string()),
-                }
-            }),
+            Ok(pending_event) => {
+                let response_cell_id = cell_id.clone();
+                let started_at = Instant::now();
+                Box::pin(async move {
+                    let outcome = match pending_event.event().await {
+                        Ok(event) => Ok(WaitOutcome::LiveCell(runtime_response(&cell_id, event)?)),
+                        Err(runtime::Error::MissingCell(_) | runtime::Error::ClosedCell(_)) => {
+                            Ok(WaitOutcome::MissingCell(missing_cell_response(cell_id)))
+                        }
+                        Err(error) => Err(error.to_string()),
+                    };
+                    tracing::info!(
+                        target: "codex_code_mode_runtime::lifecycle",
+                        cell_id = %response_cell_id,
+                        result_class = if outcome.is_ok() { "success" } else { "error" },
+                        elapsed_ms = elapsed_millis(started_at),
+                        "code_mode_service_response_resolved"
+                    );
+                    outcome
+                })
+            }
             Err(runtime::Error::MissingCell(_) | runtime::Error::ClosedCell(_)) => {
                 missing_wait(cell_id)
             }
@@ -411,6 +434,10 @@ fn missing_cell_response(cell_id: CellId) -> RuntimeResponse {
 
 fn missing_wait(cell_id: CellId) -> CodeModeSessionResultFuture<'static, WaitOutcome> {
     Box::pin(async move { Ok(WaitOutcome::MissingCell(missing_cell_response(cell_id))) })
+}
+
+fn elapsed_millis(started_at: Instant) -> u64 {
+    u64::try_from(started_at.elapsed().as_millis()).unwrap_or(u64::MAX)
 }
 
 #[cfg(test)]
