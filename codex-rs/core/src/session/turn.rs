@@ -2281,15 +2281,24 @@ async fn try_run_sampling_request(
             codex.usage.total_tokens = field::Empty,
         );
 
-        let event = match stream
-            .next()
-            .instrument(trace_span!(parent: &handle_responses, "receiving"))
-            .or_cancel(&cancellation_token)
-            .await
+        let stream_idle_timeout = turn_context.provider.info().stream_idle_timeout();
+        let event = match tokio::time::timeout(
+            stream_idle_timeout,
+            stream
+                .next()
+                .instrument(trace_span!(parent: &handle_responses, "receiving"))
+                .or_cancel(&cancellation_token),
+        )
+        .await
         {
-            Ok(event) => event,
-            Err(codex_async_utils::CancelErr::Cancelled) => {
+            Ok(Ok(event)) => event,
+            Ok(Err(codex_async_utils::CancelErr::Cancelled)) => {
                 break Err(CodexErr::TurnAborted);
+            }
+            Err(_) => {
+                break Err(CodexErr::Stream(format!(
+                    "idle timeout waiting for response event after {stream_idle_timeout:?}"
+                )));
             }
         };
 

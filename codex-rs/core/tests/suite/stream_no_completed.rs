@@ -15,6 +15,8 @@ use core_test_support::test_codex::test_codex;
 use core_test_support::wait_for_event;
 use pretty_assertions::assert_eq;
 use std::net::TcpListener;
+use std::time::Duration;
+use tokio::sync::oneshot;
 use wiremock::MockServer;
 
 fn sse_incomplete() -> String {
@@ -96,6 +98,94 @@ async fn retries_on_early_close() {
         "expected retry after incomplete SSE stream"
     );
 
+    server.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn retries_when_transport_keepalives_have_no_response_events() {
+    skip_if_no_network!();
+
+    let (first_keepalive_tx, first_keepalive_rx) = oneshot::channel();
+    let (second_keepalive_tx, second_keepalive_rx) = oneshot::channel();
+    let (hold_open_tx, hold_open_rx) = oneshot::channel::<()>();
+    let stalled_stream = vec![
+        StreamingSseChunk {
+            gate: Some(first_keepalive_rx),
+            body: ": keepalive\n\n".to_string(),
+        },
+        StreamingSseChunk {
+            gate: Some(second_keepalive_rx),
+            body: ": keepalive\n\n".to_string(),
+        },
+        StreamingSseChunk {
+            gate: Some(hold_open_rx),
+            body: ": keepalive\n\n".to_string(),
+        },
+    ];
+    let completed_sse = responses::sse_completed("resp_ok");
+    let (server, _) = start_streaming_sse_server(vec![
+        stalled_stream,
+        vec![StreamingSseChunk {
+            gate: None,
+            body: completed_sse,
+        }],
+    ])
+    .await;
+
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(30)).await;
+        let _ = first_keepalive_tx.send(());
+        tokio::time::sleep(Duration::from_millis(30)).await;
+        let _ = second_keepalive_tx.send(());
+    });
+
+    let model_provider = ModelProviderInfo {
+        name: "openai".into(),
+        base_url: Some(format!("{}/v1", server.uri())),
+        env_key: Some("PATH".into()),
+        env_key_instructions: None,
+        experimental_bearer_token: None,
+        auth: None,
+        aws: None,
+        wire_api: WireApi::Responses,
+        query_params: None,
+        http_headers: None,
+        env_http_headers: None,
+        request_max_retries: Some(0),
+        stream_max_retries: Some(1),
+        stream_idle_timeout_ms: Some(100),
+        websocket_connect_timeout_ms: None,
+        requires_openai_auth: false,
+        supports_websockets: false,
+        supports_standalone_web_search: false,
+    };
+
+    let TestCodex { codex, .. } = test_codex()
+        .with_config(move |config| {
+            config.model_provider = model_provider;
+        })
+        .build_with_streaming_server(&server)
+        .await
+        .unwrap();
+
+    codex
+        .start_or_steer_turn(TurnInputRequest::user_input(vec![UserInput::Text {
+            text: "hello".into(),
+            text_elements: Vec::new(),
+        }]))
+        .await
+        .unwrap();
+
+    wait_for_event(&codex, |event| matches!(event, EventMsg::TurnComplete(_))).await;
+
+    let requests = server.requests().await;
+    assert_eq!(
+        requests.len(),
+        2,
+        "expected retry after response-event idle timeout"
+    );
+
+    drop(hold_open_tx);
     server.shutdown().await;
 }
 
