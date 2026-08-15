@@ -466,20 +466,24 @@ mod tests {
             /*auth_manager*/ None,
         );
 
+        let explicit = Some(PromptCacheOptions {
+            mode: PromptCacheMode::Explicit,
+        });
+        for model in [
+            AMAZON_BEDROCK_GPT_5_6_SOL_MODEL_ID,
+            AMAZON_BEDROCK_GPT_5_6_TERRA_MODEL_ID,
+            AMAZON_BEDROCK_GPT_5_6_LUNA_MODEL_ID,
+        ] {
+            assert_eq!(mantle_provider.prompt_cache_options(model), explicit);
+        }
         assert_eq!(
-            (
-                mantle_provider.prompt_cache_options(AMAZON_BEDROCK_GPT_5_6_SOL_MODEL_ID),
-                mantle_provider.prompt_cache_options(AMAZON_BEDROCK_GPT_5_5_MODEL_ID),
-                runtime_provider
-                    .prompt_cache_options(AMAZON_BEDROCK_RUNTIME_GLOBAL_GPT_5_6_LUNA_MODEL_ID),
-            ),
-            (
-                Some(PromptCacheOptions {
-                    mode: PromptCacheMode::Explicit,
-                }),
-                None,
-                None,
-            )
+            mantle_provider.prompt_cache_options(AMAZON_BEDROCK_GPT_5_5_MODEL_ID),
+            None
+        );
+        assert_eq!(
+            runtime_provider
+                .prompt_cache_options(AMAZON_BEDROCK_RUNTIME_GLOBAL_GPT_5_6_LUNA_MODEL_ID),
+            None
         );
     }
 
