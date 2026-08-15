@@ -2221,20 +2221,35 @@ async fn try_run_sampling_request(
         .features
         .enabled(Feature::ConcurrentReasoningSummaries)
         && turn_context.provider.info().is_openai();
-    let mut stream = client_session
-        .stream(
-            prompt,
-            &step_context.settings.model_info,
-            &step_context.session_telemetry,
-            step_context.settings.reasoning_effort().cloned(),
-            step_context.settings.reasoning_summary,
-            step_context.settings.service_tier.clone(),
-            responses_metadata,
-            &inference_trace,
-        )
-        .instrument(trace_span!("stream_request"))
-        .or_cancel(&cancellation_token)
-        .await??;
+    let stream_idle_timeout = turn_context.provider.info().stream_idle_timeout();
+    let mut stream = match tokio::time::timeout(
+        stream_idle_timeout,
+        client_session
+            .stream(
+                prompt,
+                &step_context.settings.model_info,
+                &step_context.session_telemetry,
+                step_context.settings.reasoning_effort().cloned(),
+                step_context.settings.reasoning_summary,
+                step_context.settings.service_tier.clone(),
+                responses_metadata,
+                &inference_trace,
+            )
+            .instrument(trace_span!("stream_request"))
+            .or_cancel(&cancellation_token),
+    )
+    .await
+    {
+        Ok(Ok(stream)) => stream?,
+        Ok(Err(codex_async_utils::CancelErr::Cancelled)) => {
+            return Err(CodexErr::TurnAborted);
+        }
+        Err(_) => {
+            return Err(CodexErr::Stream(format!(
+                "idle timeout waiting for response stream after {stream_idle_timeout:?}"
+            )));
+        }
+    };
     let mut in_flight: FuturesOrdered<BoxFuture<'static, CodexResult<ResponseInputItem>>> =
         FuturesOrdered::new();
     let mut needs_follow_up = false;
