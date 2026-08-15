@@ -84,12 +84,14 @@ impl<D: SessionRuntimeDelegate> SessionRuntime<D> {
             return Err(Error::ShuttingDown);
         }
         let cell_id = self.allocate_cell_id()?;
+        let tool_call_id = request.tool_call_id.clone();
         let initial_event = self
             .start_cell(cell_id.clone(), request, initial_observe_mode)
             .await?;
         tracing::info!(
             target: "codex_code_mode_runtime::lifecycle",
             cell_id = %cell_id,
+            tool_call_id,
             observe_mode = ?initial_observe_mode,
             "code_mode_cell_started"
         );
