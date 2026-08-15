@@ -856,6 +856,9 @@ impl ModelClient {
     ) -> Result<ResponsesApiRequest> {
         let mut input = prompt.get_formatted_input_for_request(model_info.use_responses_lite);
         let prompt_cache_options = self.state.provider.prompt_cache_options(&model_info.slug);
+        let explicit_prompt_cache = prompt_cache_options
+            .as_ref()
+            .is_some_and(|options| options.mode == PromptCacheMode::Explicit);
         let base_instructions_item = || ResponseItem::Message {
             id: None,
             role: "developer".to_string(),
@@ -896,17 +899,15 @@ impl ModelClient {
             (String::new(), None)
         } else {
             let tools = Some(create_tools_raw_json_for_responses_api(&prompt.tools)?.into());
-            if prompt_cache_options.is_some() && !prompt.base_instructions.text.is_empty() {
+            if explicit_prompt_cache && !prompt.base_instructions.text.is_empty() {
                 input.insert(0, base_instructions_item());
                 (String::new(), tools)
             } else {
                 (prompt.base_instructions.text.clone(), tools)
             }
         };
-        let mut prompt_cache_breakpoints = prompt_cache_options
-            .as_ref()
-            .filter(|options| options.mode == PromptCacheMode::Explicit)
-            .and_then(|_| {
+        let mut prompt_cache_breakpoints = explicit_prompt_cache
+            .then(|| {
                 input
                     .iter()
                     .take_while(|item| match item {
@@ -925,12 +926,10 @@ impl ModelClient {
                     })
                     .last()
             })
+            .flatten()
             .into_iter()
             .collect::<Vec<_>>();
-        if prompt_cache_options
-            .as_ref()
-            .is_some_and(|options| options.mode == PromptCacheMode::Explicit)
-        {
+        if explicit_prompt_cache {
             let is_cacheable_item = |item: &ResponseItem| match item {
                 ResponseItem::Message { content, .. } => content
                     .iter()
@@ -1768,10 +1767,11 @@ impl ModelClientSession {
                 Some(original_item_ids)
             };
             let ws_input = incremental_items.as_deref().unwrap_or(&request.input);
-            let ws_breakpoints = previous_response_id
-                .is_none()
-                .then(|| request.input.prompt_cache_breakpoints())
-                .unwrap_or_default();
+            let ws_breakpoints = if previous_response_id.is_none() {
+                request.input.prompt_cache_breakpoints()
+            } else {
+                &[]
+            };
             let ws_payload = ResponseCreateWsRequest {
                 previous_response_id,
                 input: codex_api::ResponsesApiInputRef::new(ws_input, ws_breakpoints),
