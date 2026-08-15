@@ -105,6 +105,63 @@ pub(crate) fn guardian_timeout_message() -> String {
     GUARDIAN_TIMEOUT_INSTRUCTIONS.to_string()
 }
 
+#[derive(Clone, Copy)]
+enum GuardianReviewTraceTerminal {
+    Resolved(&'static str),
+    TimedOut,
+}
+
+fn trace_guardian_review_started(
+    thread_id: &str,
+    turn_id: &str,
+    review_id: &str,
+    target_item_id: Option<&str>,
+) {
+    tracing::info!(
+        thread_id,
+        turn_id,
+        review_id,
+        target_item_id,
+        timeout_ms = GUARDIAN_REVIEW_TIMEOUT.as_millis() as u64,
+        "guardian_approval_review_started"
+    );
+}
+
+fn trace_guardian_review_terminal(
+    thread_id: &str,
+    turn_id: &str,
+    review_id: &str,
+    target_item_id: Option<&str>,
+    started_at: Instant,
+    terminal: GuardianReviewTraceTerminal,
+) {
+    let elapsed_ms = started_at.elapsed().as_millis() as u64;
+    match terminal {
+        GuardianReviewTraceTerminal::Resolved(result) => {
+            tracing::info!(
+                thread_id,
+                turn_id,
+                review_id,
+                target_item_id,
+                elapsed_ms,
+                result,
+                "guardian_approval_review_resolved"
+            );
+        }
+        GuardianReviewTraceTerminal::TimedOut => {
+            tracing::warn!(
+                thread_id,
+                turn_id,
+                review_id,
+                target_item_id,
+                elapsed_ms,
+                timeout_ms = GUARDIAN_REVIEW_TIMEOUT.as_millis() as u64,
+                "guardian_approval_review_timed_out"
+            );
+        }
+    }
+}
+
 #[derive(Debug)]
 pub(super) enum GuardianReviewOutcome {
     Completed(GuardianAssessment),
@@ -313,6 +370,15 @@ async fn run_guardian_review(
     options: GuardianReviewOptions,
 ) -> ReviewDecision {
     let turn = Arc::clone(context.turn());
+    let target_item_id = guardian_request_target_item_id(&request).map(str::to_string);
+    let assessment_turn_id = guardian_request_turn_id(&request, &turn.sub_id).to_string();
+    let review_started_at = Instant::now();
+    trace_guardian_review_started(
+        &session.thread_id.to_string(),
+        &assessment_turn_id,
+        &review_id,
+        target_item_id.as_deref(),
+    );
     if !turn
         .config
         .config_layer_stack
@@ -334,6 +400,26 @@ async fn run_guardian_review(
             )
             .await
     {
+        let terminal = match &decision {
+            ReviewDecision::Approved
+            | ReviewDecision::ApprovedExecpolicyAmendment { .. }
+            | ReviewDecision::ApprovedForSession
+            | ReviewDecision::ApprovedMcpPolicyAmendment
+            | ReviewDecision::NetworkPolicyAmendment { .. } => {
+                GuardianReviewTraceTerminal::Resolved("approved")
+            }
+            ReviewDecision::Denied { .. } => GuardianReviewTraceTerminal::Resolved("denied"),
+            ReviewDecision::TimedOut => GuardianReviewTraceTerminal::TimedOut,
+            ReviewDecision::Abort => GuardianReviewTraceTerminal::Resolved("aborted"),
+        };
+        trace_guardian_review_terminal(
+            &session.thread_id.to_string(),
+            &assessment_turn_id,
+            &review_id,
+            target_item_id.as_deref(),
+            review_started_at,
+            terminal,
+        );
         if decision == ReviewDecision::Approved {
             record_guardian_non_denial(&session, guardian_request_turn_id(&request, &turn.sub_id))
                 .await;
@@ -346,8 +432,6 @@ async fn run_guardian_review(
         approval_request_source,
         external_cancel,
     } = options;
-    let target_item_id = guardian_request_target_item_id(&request).map(str::to_string);
-    let assessment_turn_id = guardian_request_turn_id(&request, &turn.sub_id).to_string();
     let plugin_attribution = plugin_attribution_override
         .or_else(|| plugin_attribution_for_guardian_request(turn.as_ref(), &request));
     let (plugin_id, script_path) = plugin_attribution
@@ -392,6 +476,14 @@ async fn run_guardian_review(
         .is_some_and(CancellationToken::is_cancelled)
     {
         let completed_at_ms = now_unix_timestamp_ms();
+        trace_guardian_review_terminal(
+            &session.thread_id.to_string(),
+            &assessment_turn_id,
+            &review_id,
+            target_item_id.as_deref(),
+            review_started_at,
+            GuardianReviewTraceTerminal::Resolved("aborted"),
+        );
         track_guardian_review(
             session.as_ref(),
             &review_tracking,
@@ -446,6 +538,14 @@ async fn run_guardian_review(
     let (assessment, count_denial_for_circuit_breaker) = match outcome {
         GuardianReviewOutcome::Completed(assessment) => {
             let approved = matches!(assessment.outcome, GuardianAssessmentOutcome::Allow);
+            trace_guardian_review_terminal(
+                &session.thread_id.to_string(),
+                &assessment_turn_id,
+                &review_id,
+                target_item_id.as_deref(),
+                review_started_at,
+                GuardianReviewTraceTerminal::Resolved(if approved { "approved" } else { "denied" }),
+            );
             track_guardian_review(
                 session.as_ref(),
                 &review_tracking,
@@ -479,6 +579,14 @@ async fn run_guardian_review(
                 let rationale =
                     "Automatic approval review timed out while evaluating the requested approval."
                         .to_string();
+                trace_guardian_review_terminal(
+                    &session.thread_id.to_string(),
+                    &assessment_turn_id,
+                    &review_id,
+                    target_item_id.as_deref(),
+                    review_started_at,
+                    GuardianReviewTraceTerminal::TimedOut,
+                );
                 track_guardian_review(
                     session.as_ref(),
                     &review_tracking,
@@ -524,6 +632,14 @@ async fn run_guardian_review(
                 return ReviewDecision::TimedOut;
             }
             GuardianReviewError::Cancelled => {
+                trace_guardian_review_terminal(
+                    &session.thread_id.to_string(),
+                    &assessment_turn_id,
+                    &review_id,
+                    target_item_id.as_deref(),
+                    review_started_at,
+                    GuardianReviewTraceTerminal::Resolved("aborted"),
+                );
                 track_guardian_review(
                     session.as_ref(),
                     &review_tracking,
@@ -563,6 +679,14 @@ async fn run_guardian_review(
             GuardianReviewError::PromptBuild { .. }
             | GuardianReviewError::Session { .. }
             | GuardianReviewError::Parse { .. } => {
+                trace_guardian_review_terminal(
+                    &session.thread_id.to_string(),
+                    &assessment_turn_id,
+                    &review_id,
+                    target_item_id.as_deref(),
+                    review_started_at,
+                    GuardianReviewTraceTerminal::Resolved("failed_closed"),
+                );
                 let message = match &error {
                     GuardianReviewError::PromptBuild { message }
                     | GuardianReviewError::Session { message, .. }
@@ -1056,6 +1180,53 @@ fn should_retry_guardian_review(outcome: &GuardianReviewOutcome) -> bool {
 mod review_tests {
     use super::*;
     use std::time::Duration;
+    use tracing_test::internal::MockWriter;
+
+    #[test]
+    fn guardian_review_lifecycle_traces_include_correlation_and_terminal_boundary() {
+        let buffer: &'static std::sync::Mutex<Vec<u8>> =
+            Box::leak(Box::new(std::sync::Mutex::new(Vec::new())));
+        let subscriber = tracing_subscriber::fmt()
+            .with_ansi(false)
+            .with_max_level(tracing::Level::INFO)
+            .with_writer(MockWriter::new(buffer))
+            .finish();
+        let _subscriber_guard = tracing::subscriber::set_default(subscriber);
+        let started_at = Instant::now();
+
+        trace_guardian_review_started("thread-test", "turn-test", "review-test", Some("item-test"));
+        trace_guardian_review_terminal(
+            "thread-test",
+            "turn-test",
+            "review-test",
+            Some("item-test"),
+            started_at,
+            GuardianReviewTraceTerminal::Resolved("approved"),
+        );
+        trace_guardian_review_terminal(
+            "thread-test",
+            "turn-test",
+            "review-timeout",
+            None,
+            started_at,
+            GuardianReviewTraceTerminal::TimedOut,
+        );
+
+        let logs = String::from_utf8(
+            buffer
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone(),
+        )
+        .expect("guardian review lifecycle logs should be valid utf-8");
+        assert!(logs.contains("guardian_approval_review_started"));
+        assert!(logs.contains("guardian_approval_review_resolved"));
+        assert!(logs.contains("guardian_approval_review_timed_out"));
+        assert!(logs.contains("thread_id=\"thread-test\""));
+        assert!(logs.contains("turn_id=\"turn-test\""));
+        assert!(logs.contains("review_id=\"review-test\""));
+        assert!(logs.contains("target_item_id=\"item-test\""));
+    }
 
     #[test]
     fn guardian_review_error_reason_distinguishes_error_kinds() {
