@@ -6,6 +6,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
+use std::time::Instant;
 
 use opentelemetry::context::FutureExt;
 use serde_json::Value as JsonValue;
@@ -86,9 +87,16 @@ impl<D: SessionRuntimeDelegate> SessionRuntime<D> {
         let initial_event = self
             .start_cell(cell_id.clone(), request, initial_observe_mode)
             .await?;
+        tracing::info!(
+            target: "codex_code_mode_runtime::lifecycle",
+            cell_id = %cell_id,
+            observe_mode = ?initial_observe_mode,
+            "code_mode_cell_started"
+        );
         Ok(StartedCell {
             cell_id,
             initial_event,
+            observe_started_at: Instant::now(),
         })
     }
 
@@ -105,6 +113,13 @@ impl<D: SessionRuntimeDelegate> SessionRuntime<D> {
         cell_id: &CellId,
         mode: ObserveMode,
     ) -> Result<PendingEvent, Error> {
+        let observe_started_at = Instant::now();
+        tracing::info!(
+            target: "codex_code_mode_runtime::lifecycle",
+            cell_id = %cell_id,
+            observe_mode = ?mode,
+            "code_mode_observe_started"
+        );
         let handle = self
             .inner
             .cells
@@ -114,6 +129,9 @@ impl<D: SessionRuntimeDelegate> SessionRuntime<D> {
             .cloned()
             .ok_or_else(|| Error::MissingCell(cell_id.clone()))?;
         Ok(PendingEvent {
+            cell_id: cell_id.clone(),
+            observe_mode: mode,
+            observe_started_at,
             event: map_actor_event(cell_id.clone(), handle.observe(mode)),
         })
     }
@@ -175,6 +193,7 @@ impl<D: SessionRuntimeDelegate> SessionRuntime<D> {
         }
         let cell_state = Arc::new(CellState::new(self.inner.shutdown_token.child_token()));
         let (handle, initial_event, task) = CellActor::prepare(
+            cell_id.clone(),
             request,
             stored_values,
             host,
@@ -215,22 +234,43 @@ impl<D: SessionRuntimeDelegate> Drop for SessionRuntime<D> {
 pub(crate) struct StartedCell {
     pub(crate) cell_id: CellId,
     initial_event: RuntimeEventFuture,
+    observe_started_at: Instant,
 }
 
 impl StartedCell {
     pub(crate) async fn initial_event(self) -> Result<CellEvent, Error> {
-        self.initial_event.await
+        let result = self.initial_event.await;
+        tracing::info!(
+            target: "codex_code_mode_runtime::lifecycle",
+            cell_id = %self.cell_id,
+            result_class = cell_event_result_class(&result),
+            elapsed_ms = elapsed_millis(self.observe_started_at),
+            "code_mode_observe_resolved"
+        );
+        result
     }
 }
 
 /// An admitted observation that has not reached its requested frontier yet.
 pub(crate) struct PendingEvent {
+    cell_id: CellId,
+    observe_mode: ObserveMode,
+    observe_started_at: Instant,
     event: RuntimeEventFuture,
 }
 
 impl PendingEvent {
     pub(crate) async fn event(self) -> Result<CellEvent, Error> {
-        self.event.await
+        let result = self.event.await;
+        tracing::info!(
+            target: "codex_code_mode_runtime::lifecycle",
+            cell_id = %self.cell_id,
+            observe_mode = ?self.observe_mode,
+            result_class = cell_event_result_class(&result),
+            elapsed_ms = elapsed_millis(self.observe_started_at),
+            "code_mode_observe_resolved"
+        );
+        result
     }
 }
 
@@ -248,7 +288,22 @@ impl<D: SessionRuntimeDelegate> CellHost for RuntimeCellHost<D> {
         invocation: CellToolCall,
         cancellation_token: CancellationToken,
     ) -> Result<JsonValue, String> {
-        self.inner
+        let started_at = Instant::now();
+        let runtime_tool_call_id = invocation.id.clone();
+        let tool_name = invocation.name.name.clone();
+        let tool_namespace = invocation.name.namespace.clone();
+        let tool_kind = invocation.kind;
+        tracing::info!(
+            target: "codex_code_mode_runtime::lifecycle",
+            cell_id = %self.cell_id,
+            runtime_tool_call_id = %runtime_tool_call_id,
+            tool_name,
+            tool_namespace,
+            ?tool_kind,
+            "code_mode_tool_started"
+        );
+        let result = self
+            .inner
             .delegate
             .invoke_tool(
                 NestedToolCall {
@@ -261,7 +316,27 @@ impl<D: SessionRuntimeDelegate> CellHost for RuntimeCellHost<D> {
                 cancellation_token,
             )
             .with_context(self.execution_context.clone())
-            .await
+            .await;
+        let (result_class, output_bytes) = match &result {
+            Ok(value) => (
+                "success",
+                serde_json::to_vec(value).map_or(0, |bytes| bytes.len()),
+            ),
+            Err(error_text) => ("error", error_text.len()),
+        };
+        tracing::info!(
+            target: "codex_code_mode_runtime::lifecycle",
+            cell_id = %self.cell_id,
+            runtime_tool_call_id = %runtime_tool_call_id,
+            tool_name,
+            tool_namespace,
+            ?tool_kind,
+            result_class,
+            output_bytes,
+            elapsed_ms = elapsed_millis(started_at),
+            "code_mode_tool_finished"
+        );
+        result
     }
 
     async fn notify(
@@ -283,27 +358,80 @@ impl<D: SessionRuntimeDelegate> CellHost for RuntimeCellHost<D> {
         pending_initial_yield_items: Option<Vec<OutputItem>>,
         cell_state: Arc<CellState>,
     ) -> CompletionCommit {
+        let event_class = match &event {
+            CellEvent::Yielded { .. } => "yielded",
+            CellEvent::Pending { .. } => "pending",
+            CellEvent::Completed { .. } => "completed",
+            CellEvent::Terminated { .. } => "terminated",
+        };
+        let pending_initial_yield_count = pending_initial_yield_items.as_ref().map_or(0, Vec::len);
+        let started_at = Instant::now();
         let cancellation_token = cell_state.cancellation_token();
         let mut stored_values = tokio::select! {
             biased;
             _ = cancellation_token.cancelled() => {
+                tracing::info!(
+                    target: "codex_code_mode_runtime::lifecycle",
+                    cell_id = %self.cell_id,
+                    event_class,
+                    pending_initial_yield_count,
+                    accepted = false,
+                    elapsed_ms = elapsed_millis(started_at),
+                    "code_mode_completion_committed"
+                );
                 return CompletionCommit::Rejected(event);
             }
             stored_values = self.inner.stored_values.lock() => stored_values,
         };
-        cell_state.commit_completion(event, pending_initial_yield_items, || {
+        let commit = cell_state.commit_completion(event, pending_initial_yield_items, || {
             stored_values.extend(stored_value_writes);
-        })
+        });
+        tracing::info!(
+            target: "codex_code_mode_runtime::lifecycle",
+            cell_id = %self.cell_id,
+            event_class,
+            pending_initial_yield_count,
+            accepted = matches!(&commit, CompletionCommit::Committed),
+            elapsed_ms = elapsed_millis(started_at),
+            "code_mode_completion_committed"
+        );
+        commit
     }
 
     async fn closed(&self) {
-        self.inner.cells.lock().await.remove(&self.cell_id);
+        let registry_removed = self
+            .inner
+            .cells
+            .lock()
+            .await
+            .remove(&self.cell_id)
+            .is_some();
         self.inner.delegate.cell_closed(&self.cell_id);
+        tracing::info!(
+            target: "codex_code_mode_runtime::lifecycle",
+            cell_id = %self.cell_id,
+            registry_removed,
+            "code_mode_cell_closed"
+        );
     }
 }
 
 fn map_actor_event(cell_id: CellId, event: CellEventFuture) -> RuntimeEventFuture {
     Box::pin(async move { event.await.map_err(|error| actor_error(&cell_id, error)) })
+}
+
+fn cell_event_result_class(result: &Result<CellEvent, Error>) -> &str {
+    match result {
+        Ok(CellEvent::Yielded { .. }) => "yielded",
+        Ok(CellEvent::Pending { .. }) => "pending",
+        Ok(CellEvent::Completed { .. }) => "completed",
+        Ok(CellEvent::Terminated { .. }) => "terminated",
+        Err(_) => "error",
+    }
+}
+
+fn elapsed_millis(started_at: Instant) -> u64 {
+    u64::try_from(started_at.elapsed().as_millis()).unwrap_or(u64::MAX)
 }
 
 fn actor_error(cell_id: &CellId, error: CellError) -> Error {
