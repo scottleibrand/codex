@@ -5,6 +5,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 
 use codex_api::ApiError;
+use codex_api::PromptCacheOptions;
 use codex_api::Provider;
 use codex_api::SharedAuthProvider;
 use codex_api::is_azure_responses_provider;
@@ -124,6 +125,14 @@ pub trait ModelProvider: fmt::Debug + Send + Sync {
     /// Returns the provider-owned capability upper bounds.
     fn capabilities(&self) -> ProviderCapabilities {
         ProviderCapabilities::default()
+    }
+
+    /// Returns request-wide prompt cache options for the selected model.
+    ///
+    /// Implementations should return options only for models and endpoints that
+    /// support the corresponding Responses API fields.
+    fn prompt_cache_options(&self, _model: &str) -> Option<PromptCacheOptions> {
+        None
     }
 
     /// Returns the preferred model used for automatic approval review.

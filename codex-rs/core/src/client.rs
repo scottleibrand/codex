@@ -39,6 +39,7 @@ use codex_api::Compression;
 use codex_api::MemoriesClient as ApiMemoriesClient;
 use codex_api::MemorySummarizeInput as ApiMemorySummarizeInput;
 use codex_api::MemorySummarizeOutput as ApiMemorySummarizeOutput;
+use codex_api::PromptCacheMode;
 use codex_api::Provider as ApiProvider;
 use codex_api::RawMemory as ApiRawMemory;
 use codex_api::RealtimeCallClient as ApiRealtimeCallClient;
@@ -323,6 +324,7 @@ fn responses_request_properties_match(
         include: previous_include,
         service_tier: previous_service_tier,
         prompt_cache_key: previous_prompt_cache_key,
+        prompt_cache_options: previous_prompt_cache_options,
         text: previous_text,
         client_metadata: _,
     } = previous;
@@ -340,6 +342,7 @@ fn responses_request_properties_match(
         include: current_include,
         service_tier: current_service_tier,
         prompt_cache_key: current_prompt_cache_key,
+        prompt_cache_options: current_prompt_cache_options,
         text: current_text,
         client_metadata: _,
     } = current;
@@ -357,6 +360,7 @@ fn responses_request_properties_match(
         && previous_include == current_include
         && previous_service_tier == current_service_tier
         && previous_prompt_cache_key == current_prompt_cache_key
+        && previous_prompt_cache_options == current_prompt_cache_options
         && previous_text == current_text
 }
 
@@ -851,6 +855,16 @@ impl ModelClient {
         responses_metadata: &CodexResponsesMetadata,
     ) -> Result<ResponsesApiRequest> {
         let mut input = prompt.get_formatted_input_for_request(model_info.use_responses_lite);
+        let prompt_cache_options = self.state.provider.prompt_cache_options(&model_info.slug);
+        let base_instructions_item = || ResponseItem::Message {
+            id: None,
+            role: "developer".to_string(),
+            content: vec![ContentItem::InputText {
+                text: prompt.base_instructions.text.clone(),
+            }],
+            phase: None,
+            internal_chat_message_metadata_passthrough: None,
+        };
         let is_openai = self.state.provider.info().is_openai();
         if !is_openai {
             for item in &mut input {
@@ -876,24 +890,68 @@ impl ModelClient {
                 tools,
             }];
             if !prompt.base_instructions.text.is_empty() {
-                prefix.push(ResponseItem::Message {
-                    id: None,
-                    role: "developer".to_string(),
-                    content: vec![ContentItem::InputText {
-                        text: prompt.base_instructions.text.clone(),
-                    }],
-                    phase: None,
-                    internal_chat_message_metadata_passthrough: None,
-                });
+                prefix.push(base_instructions_item());
             }
             input.splice(0..0, prefix);
             (String::new(), None)
         } else {
-            (
-                prompt.base_instructions.text.clone(),
-                Some(create_tools_raw_json_for_responses_api(&prompt.tools)?.into()),
-            )
+            let tools = Some(create_tools_raw_json_for_responses_api(&prompt.tools)?.into());
+            if prompt_cache_options.is_some() && !prompt.base_instructions.text.is_empty() {
+                input.insert(0, base_instructions_item());
+                (String::new(), tools)
+            } else {
+                (prompt.base_instructions.text.clone(), tools)
+            }
         };
+        let mut prompt_cache_breakpoints = prompt_cache_options
+            .as_ref()
+            .filter(|options| options.mode == PromptCacheMode::Explicit)
+            .and_then(|_| {
+                input
+                    .iter()
+                    .take_while(|item| match item {
+                        ResponseItem::Message { role, .. }
+                        | ResponseItem::AdditionalTools { role, .. } => role == "developer",
+                        _ => false,
+                    })
+                    .enumerate()
+                    .filter_map(|(index, item)| match item {
+                        ResponseItem::Message { content, .. }
+                            if matches!(content.first(), Some(ContentItem::InputText { .. })) =>
+                        {
+                            Some(index)
+                        }
+                        _ => None,
+                    })
+                    .last()
+            })
+            .into_iter()
+            .collect::<Vec<_>>();
+        if prompt_cache_options
+            .as_ref()
+            .is_some_and(|options| options.mode == PromptCacheMode::Explicit)
+        {
+            prompt_cache_breakpoints.extend(
+                input
+                    .iter()
+                    .enumerate()
+                    .rev()
+                    .filter_map(|(index, item)| match item {
+                        ResponseItem::Message { content, .. }
+                            if content
+                                .iter()
+                                .any(|block| matches!(block, ContentItem::InputText { .. })) =>
+                        {
+                            Some(index)
+                        }
+                        ResponseItem::FunctionCallOutput { .. } => Some(index),
+                        _ => None,
+                    })
+                    .take(2),
+            );
+            prompt_cache_breakpoints.sort_unstable();
+            prompt_cache_breakpoints.dedup();
+        }
         let reasoning = Self::build_reasoning(model_info, effort, summary);
         let stream_options = (self.state.concurrent_reasoning_summaries_enabled
             && is_openai
@@ -923,7 +981,10 @@ impl ModelClient {
         let request = ResponsesApiRequest {
             model: model_info.slug.clone(),
             instructions,
-            input,
+            input: codex_api::ResponsesApiInput::with_prompt_cache_breakpoints(
+                input,
+                prompt_cache_breakpoints,
+            ),
             tools,
             tool_choice: "auto".to_string(),
             parallel_tool_calls: prompt.parallel_tool_calls && !model_info.use_responses_lite,
@@ -934,6 +995,7 @@ impl ModelClient {
             include,
             service_tier,
             prompt_cache_key,
+            prompt_cache_options,
             text,
             client_metadata: Some(responses_metadata.client_metadata()),
         };
@@ -1694,9 +1756,14 @@ impl ModelClientSession {
                     .prepare_response_items_for_request(&mut request.input);
                 Some(original_item_ids)
             };
+            let ws_input = incremental_items.as_deref().unwrap_or(&request.input);
+            let ws_breakpoints = previous_response_id
+                .is_none()
+                .then(|| request.input.prompt_cache_breakpoints())
+                .unwrap_or_default();
             let ws_payload = ResponseCreateWsRequest {
                 previous_response_id,
-                input: incremental_items.as_deref().unwrap_or(&request.input),
+                input: codex_api::ResponsesApiInputRef::new(ws_input, ws_breakpoints),
                 generate: if warmup { Some(false) } else { None },
                 client_metadata: response_create_client_metadata(
                     Some(client_metadata),

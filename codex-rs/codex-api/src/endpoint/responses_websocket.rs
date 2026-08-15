@@ -909,6 +909,7 @@ fn serialize_websocket_request(request: &ResponsesWsRequest<'_>) -> Result<Strin
 mod tests {
     use super::*;
     use crate::common::ResponseCreateWsRequest;
+    use crate::common::ResponsesApiInputRef;
     use crate::common::ResponsesApiRequest;
     use codex_protocol::ResponseItemId;
     use codex_protocol::models::ContentItem;
@@ -933,7 +934,8 @@ mod tests {
                 }],
                 phase: None,
                 internal_chat_message_metadata_passthrough: None,
-            }],
+            }]
+            .into(),
             tools: Some(
                 Arc::<RawValue>::from(
                     to_raw_value(&vec![json!({
@@ -954,6 +956,9 @@ mod tests {
             include: vec!["reasoning.encrypted_content".to_string()],
             service_tier: Some("priority".to_string()),
             prompt_cache_key: Some("cache-key".to_string()),
+            prompt_cache_options: Some(crate::common::PromptCacheOptions {
+                mode: crate::common::PromptCacheMode::Explicit,
+            }),
             text: None,
             client_metadata: Some(HashMap::from([(
                 "traceparent".to_string(),
@@ -977,6 +982,34 @@ mod tests {
             serde_json::from_str::<Value>(&request_text).expect("parse websocket request");
 
         assert_eq!(wire_payload, expected_payload);
+    }
+
+    #[test]
+    fn websocket_input_breakpoint_is_omitted_from_incremental_delta() {
+        let items = vec![ResponseItem::Message {
+            id: None,
+            role: "developer".to_string(),
+            content: vec![ContentItem::InputText {
+                text: "stable prefix".to_string(),
+            }],
+            phase: None,
+            internal_chat_message_metadata_passthrough: None,
+        }];
+
+        let full_input = serde_json::to_value(ResponsesApiInputRef::new(&items, &[0]))
+            .expect("serialize full websocket input");
+        assert_eq!(
+            full_input[0]["content"][0]["prompt_cache_breakpoint"],
+            json!({"mode": "explicit"})
+        );
+
+        let incremental_input = serde_json::to_value(ResponsesApiInputRef::new(&items, &[]))
+            .expect("serialize incremental websocket input");
+        assert!(
+            incremental_input[0]["content"][0]
+                .get("prompt_cache_breakpoint")
+                .is_none()
+        );
     }
 
     #[test]

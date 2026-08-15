@@ -1,4 +1,7 @@
 use codex_api::OpenAiVerbosity;
+use codex_api::PromptCacheMode;
+use codex_api::PromptCacheOptions;
+use codex_api::ResponsesApiInput;
 use codex_api::ResponsesApiRequest;
 use codex_api::TextControls;
 use codex_api::create_text_param_for_request;
@@ -114,7 +117,7 @@ fn serializes_text_verbosity_when_set() {
     let req = ResponsesApiRequest {
         model: "gpt-5.4".to_string(),
         instructions: "i".to_string(),
-        input,
+        input: input.into(),
         tools: Some(empty_tools().into()),
         tool_choice: "auto".to_string(),
         parallel_tool_calls: true,
@@ -124,6 +127,7 @@ fn serializes_text_verbosity_when_set() {
         stream_options: None,
         include: vec![],
         prompt_cache_key: None,
+        prompt_cache_options: None,
         service_tier: None,
         text: Some(TextControls {
             verbosity: Some(OpenAiVerbosity::Low),
@@ -139,6 +143,57 @@ fn serializes_text_verbosity_when_set() {
             .and_then(|s| s.as_str()),
         Some("low")
     );
+}
+
+#[test]
+fn serializes_explicit_prompt_cache_options_when_set() {
+    let req = ResponsesApiRequest {
+        model: "gpt-5.6-sol".to_string(),
+        instructions: "i".to_string(),
+        input: ResponsesApiInput::with_prompt_cache_breakpoints(
+            vec![ResponseItem::Message {
+                id: None,
+                role: "developer".to_string(),
+                content: vec![ContentItem::InputText {
+                    text: "stable prefix".to_string(),
+                }],
+                phase: None,
+                internal_chat_message_metadata_passthrough: None,
+            }],
+            vec![0],
+        ),
+        tools: Some(empty_tools().into()),
+        tool_choice: "auto".to_string(),
+        parallel_tool_calls: true,
+        reasoning: None,
+        store: false,
+        stream: true,
+        stream_options: None,
+        include: vec![],
+        prompt_cache_key: Some("cache-key".to_string()),
+        prompt_cache_options: Some(PromptCacheOptions {
+            mode: PromptCacheMode::Explicit,
+        }),
+        service_tier: None,
+        text: None,
+        client_metadata: None,
+    };
+
+    let value = serde_json::to_value(&req).expect("json");
+    assert_eq!(
+        value.get("prompt_cache_options"),
+        Some(&serde_json::json!({"mode": "explicit"}))
+    );
+    assert_eq!(
+        value["input"][0]["content"][0]["prompt_cache_breakpoint"],
+        serde_json::json!({"mode": "explicit"})
+    );
+    assert!(matches!(
+        req.input[0],
+        ResponseItem::Message { ref content, .. }
+            if matches!(content.as_slice(), [ContentItem::InputText { text }]
+                if text == "stable prefix")
+    ));
 }
 
 #[test]
@@ -161,7 +216,7 @@ fn serializes_text_schema_with_strict_format() {
     let req = ResponsesApiRequest {
         model: "gpt-5.4".to_string(),
         instructions: "i".to_string(),
-        input,
+        input: input.into(),
         tools: Some(empty_tools().into()),
         tool_choice: "auto".to_string(),
         parallel_tool_calls: true,
@@ -171,6 +226,7 @@ fn serializes_text_schema_with_strict_format() {
         stream_options: None,
         include: vec![],
         prompt_cache_key: None,
+        prompt_cache_options: None,
         service_tier: None,
         text: Some(text_controls),
         client_metadata: None,
@@ -222,7 +278,7 @@ fn omits_text_when_not_set() {
     let req = ResponsesApiRequest {
         model: "gpt-5.4".to_string(),
         instructions: "i".to_string(),
-        input,
+        input: input.into(),
         tools: Some(empty_tools().into()),
         tool_choice: "auto".to_string(),
         parallel_tool_calls: true,
@@ -232,6 +288,7 @@ fn omits_text_when_not_set() {
         stream_options: None,
         include: vec![],
         prompt_cache_key: None,
+        prompt_cache_options: None,
         service_tier: None,
         text: None,
         client_metadata: None,
@@ -246,7 +303,7 @@ fn serializes_flex_service_tier_when_set() {
     let req = ResponsesApiRequest {
         model: "gpt-5.4".to_string(),
         instructions: "i".to_string(),
-        input: vec![],
+        input: vec![].into(),
         tools: Some(empty_tools().into()),
         tool_choice: "auto".to_string(),
         parallel_tool_calls: true,
@@ -256,6 +313,7 @@ fn serializes_flex_service_tier_when_set() {
         stream_options: None,
         include: vec![],
         prompt_cache_key: None,
+        prompt_cache_options: None,
         service_tier: Some(ServiceTier::Flex.to_string()),
         text: None,
         client_metadata: None,

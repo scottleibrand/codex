@@ -17,6 +17,8 @@ use crate::test_support::TestCodexResponsesRequestKind;
 use crate::test_support::responses_metadata as test_responses_metadata;
 use codex_api::AgentIdentityTelemetry;
 use codex_api::ApiError;
+use codex_api::PromptCacheMode;
+use codex_api::PromptCacheOptions;
 use codex_api::ResponseEvent;
 use codex_api::TransportError;
 use codex_http_client::HttpClientFactory;
@@ -29,6 +31,7 @@ use codex_login::auth::AgentIdentityAuthPolicy;
 use codex_model_provider::BearerAuthProvider;
 use codex_model_provider::SharedModelProvider;
 use codex_model_provider::create_model_provider;
+use codex_model_provider_info::AMAZON_BEDROCK_GPT_5_6_SOL_MODEL_ID;
 use codex_model_provider_info::CHATGPT_CODEX_BASE_URL;
 use codex_model_provider_info::ModelProviderInfo;
 use codex_model_provider_info::WireApi;
@@ -38,6 +41,7 @@ use codex_protocol::ThreadId;
 use codex_protocol::auth::AuthMode;
 use codex_protocol::models::BaseInstructions;
 use codex_protocol::models::ContentItem;
+use codex_protocol::models::FunctionCallOutputPayload;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::openai_models::ModelInfo;
 use codex_protocol::openai_models::ReasoningEffort;
@@ -270,6 +274,114 @@ fn test_model_info() -> ModelInfo {
         "experimental_supported_tools": []
     }))
     .expect("deserialize test model info")
+}
+
+#[test]
+fn mantle_gpt_5_6_requests_mark_stable_and_recent_history_for_caching() -> anyhow::Result<()> {
+    let client = ModelClient::new(
+        /*auth_manager*/ None,
+        AgentIdentityAuthPolicy::JwtOnly,
+        ThreadId::new(),
+        ModelProviderInfo::create_amazon_bedrock_provider(/*aws*/ None),
+        SessionSource::Cli,
+        "test_originator".to_string(),
+        /*model_verbosity*/ None,
+        /*enable_request_compression*/ false,
+        /*include_timing_metrics*/ false,
+        /*beta_features_header*/ None,
+        /*concurrent_reasoning_summaries_enabled*/ false,
+        /*attestation_provider*/ None,
+        HttpClientFactory::new(OutboundProxyPolicy::ReqwestDefault),
+    );
+    let mut model_info = test_model_info();
+    model_info.slug = AMAZON_BEDROCK_GPT_5_6_SOL_MODEL_ID.to_string();
+    let responses_metadata = test_responses_metadata_for_client(
+        &client,
+        /*turn_id*/ None,
+        format!("{}:0", client.state.thread_id),
+        /*parent_thread_id*/ None,
+        TestCodexResponsesRequestKind::Turn,
+    );
+
+    let prompt = Prompt {
+        input: vec![
+            ResponseItem::Message {
+                id: None,
+                role: "developer".to_string(),
+                content: vec![ContentItem::InputText {
+                    text: "stable startup context".to_string(),
+                }],
+                phase: None,
+                internal_chat_message_metadata_passthrough: None,
+            },
+            ResponseItem::Message {
+                id: None,
+                role: "user".to_string(),
+                content: vec![ContentItem::InputText {
+                    text: "dynamic turn input".to_string(),
+                }],
+                phase: None,
+                internal_chat_message_metadata_passthrough: None,
+            },
+            ResponseItem::FunctionCallOutput {
+                id: None,
+                call_id: "call-1".to_string(),
+                output: FunctionCallOutputPayload::from_text("tool output".to_string()),
+                internal_chat_message_metadata_passthrough: None,
+            },
+        ],
+        base_instructions: BaseInstructions {
+            text: "stable developer instructions".to_string(),
+            provenance: None,
+        },
+        ..Prompt::default()
+    };
+    let request = client.build_responses_request(
+        &prompt,
+        &model_info,
+        /*effort*/ None,
+        codex_protocol::config_types::ReasoningSummary::None,
+        /*service_tier*/ None,
+        &responses_metadata,
+    )?;
+
+    assert_eq!(
+        request.prompt_cache_options,
+        Some(PromptCacheOptions {
+            mode: PromptCacheMode::Explicit,
+        })
+    );
+    assert!(request.instructions.is_empty());
+    assert!(request.tools.is_some());
+    assert!(matches!(
+        request.input[0],
+        ResponseItem::Message { ref role, ref content, .. }
+            if role == "developer"
+                && matches!(content.as_slice(), [ContentItem::InputText { text }]
+                    if text == "stable developer instructions")
+    ));
+    let wire_request = serde_json::to_value(&request)?;
+    assert_eq!(
+        wire_request["prompt_cache_options"],
+        serde_json::json!({"mode": "explicit"})
+    );
+    assert!(
+        wire_request["input"][0]["content"][0]
+            .get("prompt_cache_breakpoint")
+            .is_none()
+    );
+    for index in [1, 2] {
+        assert_eq!(
+            wire_request["input"][index]["content"][0]["prompt_cache_breakpoint"],
+            serde_json::json!({"mode": "explicit"})
+        );
+    }
+    assert_eq!(
+        wire_request["input"][3]["output"][0]["prompt_cache_breakpoint"],
+        serde_json::json!({"mode": "explicit"})
+    );
+    assert_eq!(wire_request["input"][3]["output"][0]["text"], "tool output");
+    Ok(())
 }
 
 fn test_session_telemetry() -> SessionTelemetry {

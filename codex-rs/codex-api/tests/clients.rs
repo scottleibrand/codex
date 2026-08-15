@@ -320,7 +320,8 @@ async fn responses_client_stream_request_preserves_item_ids() -> Result<()> {
             content: vec![ContentItem::InputText { text: "hi".into() }],
             phase: None,
             internal_chat_message_metadata_passthrough: None,
-        }],
+        }]
+        .into(),
         tools: Some(empty_tools().into()),
         tool_choice: "auto".into(),
         parallel_tool_calls: false,
@@ -331,6 +332,7 @@ async fn responses_client_stream_request_preserves_item_ids() -> Result<()> {
         include: Vec::new(),
         service_tier: None,
         prompt_cache_key: None,
+        prompt_cache_options: None,
         text: None,
         client_metadata: None,
     };
@@ -407,7 +409,7 @@ async fn streaming_client_retries_on_transport_error() -> Result<()> {
     let request = ResponsesApiRequest {
         model: "gpt-test".into(),
         instructions: "Say hi".into(),
-        input: Vec::new(),
+        input: Vec::new().into(),
         tools: Some(empty_tools().into()),
         tool_choice: "auto".into(),
         parallel_tool_calls: false,
@@ -418,6 +420,7 @@ async fn streaming_client_retries_on_transport_error() -> Result<()> {
         include: Vec::new(),
         service_tier: None,
         prompt_cache_key: None,
+        prompt_cache_options: None,
         text: None,
         client_metadata: None,
     };
@@ -527,7 +530,8 @@ async fn azure_store_sends_ids_and_headers() -> Result<()> {
             content: vec![ContentItem::InputText { text: "hi".into() }],
             phase: None,
             internal_chat_message_metadata_passthrough: None,
-        }],
+        }]
+        .into(),
         tools: Some(empty_tools().into()),
         tool_choice: "auto".into(),
         parallel_tool_calls: false,
@@ -538,6 +542,7 @@ async fn azure_store_sends_ids_and_headers() -> Result<()> {
         include: Vec::new(),
         service_tier: None,
         prompt_cache_key: None,
+        prompt_cache_options: None,
         text: None,
         client_metadata: None,
     };

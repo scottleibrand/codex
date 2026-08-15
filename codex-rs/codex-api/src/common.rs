@@ -11,9 +11,13 @@ use codex_protocol::protocol::W3cTraceContext;
 use futures::Stream;
 use serde::Deserialize;
 use serde::Serialize;
+use serde::ser::Error as _;
+use serde::ser::SerializeSeq;
 use serde_json::Value;
 use serde_json::value::RawValue;
 use std::collections::HashMap;
+use std::ops::Deref;
+use std::ops::DerefMut;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::Context;
@@ -204,6 +208,18 @@ pub enum OpenAiVerbosity {
     High,
 }
 
+#[derive(Debug, Serialize, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum PromptCacheMode {
+    Implicit,
+    Explicit,
+}
+
+#[derive(Debug, Serialize, Clone, Copy, PartialEq, Eq)]
+pub struct PromptCacheOptions {
+    pub mode: PromptCacheMode,
+}
+
 impl From<VerbosityConfig> for OpenAiVerbosity {
     fn from(v: VerbosityConfig) -> Self {
         match v {
@@ -248,12 +264,143 @@ impl Serialize for ResponsesApiTools {
     }
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct ResponsesApiInput {
+    items: Vec<ResponseItem>,
+    prompt_cache_breakpoints: Vec<usize>,
+}
+
+impl ResponsesApiInput {
+    pub fn with_prompt_cache_breakpoints(
+        items: Vec<ResponseItem>,
+        prompt_cache_breakpoints: Vec<usize>,
+    ) -> Self {
+        Self {
+            items,
+            prompt_cache_breakpoints,
+        }
+    }
+
+    pub fn prompt_cache_breakpoints(&self) -> &[usize] {
+        &self.prompt_cache_breakpoints
+    }
+}
+
+impl From<Vec<ResponseItem>> for ResponsesApiInput {
+    fn from(items: Vec<ResponseItem>) -> Self {
+        Self::with_prompt_cache_breakpoints(items, Vec::new())
+    }
+}
+
+impl Deref for ResponsesApiInput {
+    type Target = Vec<ResponseItem>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.items
+    }
+}
+
+impl DerefMut for ResponsesApiInput {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.items
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct ResponsesApiInputRef<'a> {
+    items: &'a [ResponseItem],
+    prompt_cache_breakpoints: &'a [usize],
+}
+
+impl<'a> ResponsesApiInputRef<'a> {
+    pub fn new(items: &'a [ResponseItem], prompt_cache_breakpoints: &'a [usize]) -> Self {
+        Self {
+            items,
+            prompt_cache_breakpoints,
+        }
+    }
+}
+
+fn insert_prompt_cache_breakpoint(wire_item: &mut Value) -> Result<(), &'static str> {
+    let item_type = wire_item.get("type").and_then(Value::as_str);
+    let content = match item_type {
+        Some("message") => wire_item.get_mut("content"),
+        Some("function_call_output") => {
+            let output = wire_item
+                .get_mut("output")
+                .ok_or("function call output is missing output")?;
+            if let Some(text) = output.as_str().map(str::to_owned) {
+                *output = serde_json::json!([{"type": "input_text", "text": text}]);
+            }
+            Some(output)
+        }
+        _ => None,
+    }
+    .and_then(Value::as_array_mut)
+    .ok_or("prompt cache breakpoint must target message or function output content")?;
+    let block = content
+        .iter_mut()
+        .rev()
+        .find(|block| {
+            matches!(
+                block.get("type").and_then(Value::as_str),
+                Some("input_text" | "input_image" | "input_file")
+            )
+        })
+        .and_then(Value::as_object_mut)
+        .ok_or("prompt cache breakpoint requires supported input content")?;
+    block.insert(
+        "prompt_cache_breakpoint".to_string(),
+        serde_json::json!({"mode": "explicit"}),
+    );
+    Ok(())
+}
+
+fn serialize_responses_api_input<S>(
+    items: &[ResponseItem],
+    prompt_cache_breakpoints: &[usize],
+    serializer: S,
+) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    let mut sequence = serializer.serialize_seq(Some(items.len()))?;
+    for (index, item) in items.iter().enumerate() {
+        if prompt_cache_breakpoints.contains(&index) {
+            let mut wire_item = serde_json::to_value(item).map_err(S::Error::custom)?;
+            insert_prompt_cache_breakpoint(&mut wire_item).map_err(S::Error::custom)?;
+            sequence.serialize_element(&wire_item)?;
+        } else {
+            sequence.serialize_element(item)?;
+        }
+    }
+    sequence.end()
+}
+
+impl Serialize for ResponsesApiInput {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serialize_responses_api_input(&self.items, &self.prompt_cache_breakpoints, serializer)
+    }
+}
+
+impl Serialize for ResponsesApiInputRef<'_> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serialize_responses_api_input(self.items, self.prompt_cache_breakpoints, serializer)
+    }
+}
+
 #[derive(Debug, Serialize, Clone, PartialEq)]
 pub struct ResponsesApiRequest {
     pub model: String,
     #[serde(skip_serializing_if = "String::is_empty")]
     pub instructions: String,
-    pub input: Vec<ResponseItem>,
+    pub input: ResponsesApiInput,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tools: Option<ResponsesApiTools>,
     pub tool_choice: String,
@@ -269,6 +416,8 @@ pub struct ResponsesApiRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub prompt_cache_key: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub prompt_cache_options: Option<PromptCacheOptions>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub text: Option<TextControls>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub client_metadata: Option<HashMap<String, String>>,
@@ -280,7 +429,10 @@ impl<'a> From<&'a ResponsesApiRequest> for ResponseCreateWsRequest<'a> {
             model: &request.model,
             instructions: &request.instructions,
             previous_response_id: None,
-            input: &request.input,
+            input: ResponsesApiInputRef::new(
+                &request.input,
+                request.input.prompt_cache_breakpoints(),
+            ),
             tools: request.tools.as_ref().map(ResponsesApiTools::as_raw_value),
             tool_choice: &request.tool_choice,
             parallel_tool_calls: request.parallel_tool_calls,
@@ -291,6 +443,7 @@ impl<'a> From<&'a ResponsesApiRequest> for ResponseCreateWsRequest<'a> {
             include: &request.include,
             service_tier: request.service_tier.as_deref(),
             prompt_cache_key: request.prompt_cache_key.as_deref(),
+            prompt_cache_options: request.prompt_cache_options.as_ref(),
             text: request.text.as_ref(),
             generate: None,
             client_metadata: request.client_metadata.clone(),
@@ -305,7 +458,7 @@ pub struct ResponseCreateWsRequest<'a> {
     pub instructions: &'a str,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub previous_response_id: Option<String>,
-    pub input: &'a [ResponseItem],
+    pub input: ResponsesApiInputRef<'a>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tools: Option<&'a RawValue>,
     pub tool_choice: &'a str,
@@ -320,6 +473,8 @@ pub struct ResponseCreateWsRequest<'a> {
     pub service_tier: Option<&'a str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub prompt_cache_key: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub prompt_cache_options: Option<&'a PromptCacheOptions>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub text: Option<&'a TextControls>,
     #[serde(skip_serializing_if = "Option::is_none")]

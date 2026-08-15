@@ -9,12 +9,15 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use codex_api::ApiError;
+use codex_api::PromptCacheMode;
+use codex_api::PromptCacheOptions;
 use codex_api::Provider;
 use codex_api::SharedAuthProvider;
 use codex_login::AuthManager;
 use codex_login::CodexAuth;
 use codex_login::auth::BedrockApiKeyAuth;
 use codex_model_provider_info::AMAZON_BEDROCK_GPT_5_6_LUNA_MODEL_ID;
+use codex_model_provider_info::AMAZON_BEDROCK_GPT_5_6_SOL_MODEL_ID;
 use codex_model_provider_info::AMAZON_BEDROCK_GPT_5_6_TERRA_MODEL_ID;
 use codex_model_provider_info::AMAZON_BEDROCK_RUNTIME_GLOBAL_GPT_5_6_LUNA_MODEL_ID;
 use codex_model_provider_info::AMAZON_BEDROCK_RUNTIME_GLOBAL_GPT_5_6_TERRA_MODEL_ID;
@@ -164,6 +167,19 @@ impl ModelProvider for AmazonBedrockModelProvider {
         }
     }
 
+    fn prompt_cache_options(&self, model: &str) -> Option<PromptCacheOptions> {
+        (self.endpoint == BedrockEndpoint::Mantle
+            && matches!(
+                model,
+                AMAZON_BEDROCK_GPT_5_6_SOL_MODEL_ID
+                    | AMAZON_BEDROCK_GPT_5_6_TERRA_MODEL_ID
+                    | AMAZON_BEDROCK_GPT_5_6_LUNA_MODEL_ID
+            ))
+        .then_some(PromptCacheOptions {
+            mode: PromptCacheMode::Explicit,
+        })
+    }
+
     fn approval_review_preferred_model(&self) -> &'static str {
         match self.endpoint {
             BedrockEndpoint::Mantle => AMAZON_BEDROCK_GPT_5_6_LUNA_MODEL_ID,
@@ -254,6 +270,7 @@ mod error_tests;
 mod tests {
     use std::num::NonZeroU64;
 
+    use codex_model_provider_info::AMAZON_BEDROCK_GPT_5_5_MODEL_ID;
     use codex_protocol::config_types::ModelProviderAuthInfo;
     use http::HeaderValue;
     use pretty_assertions::assert_eq;
@@ -435,6 +452,34 @@ mod tests {
                 external_web_access: false,
                 remote_compaction: RemoteCompactionSupport::V1,
             }
+        );
+    }
+
+    #[test]
+    fn mantle_uses_explicit_prompt_caching_for_gpt_5_6_only() {
+        let mantle_provider = AmazonBedrockModelProvider::new(
+            ModelProviderInfo::create_amazon_bedrock_provider(/*aws*/ None),
+            /*auth_manager*/ None,
+        );
+        let runtime_provider = AmazonBedrockModelProvider::new(
+            ModelProviderInfo::create_amazon_bedrock_runtime_provider(/*aws*/ None),
+            /*auth_manager*/ None,
+        );
+
+        assert_eq!(
+            (
+                mantle_provider.prompt_cache_options(AMAZON_BEDROCK_GPT_5_6_SOL_MODEL_ID),
+                mantle_provider.prompt_cache_options(AMAZON_BEDROCK_GPT_5_5_MODEL_ID),
+                runtime_provider
+                    .prompt_cache_options(AMAZON_BEDROCK_RUNTIME_GLOBAL_GPT_5_6_LUNA_MODEL_ID),
+            ),
+            (
+                Some(PromptCacheOptions {
+                    mode: PromptCacheMode::Explicit,
+                }),
+                None,
+                None,
+            )
         );
     }
 
