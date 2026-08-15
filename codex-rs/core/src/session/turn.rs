@@ -1342,7 +1342,7 @@ async fn run_sampling_request(
         Arc::clone(&step_context),
         Arc::clone(&turn_diff_tracker),
     );
-    let max_retries = turn_context.provider.info().stream_max_retries();
+    let max_retries = turn_context.config.model_provider.stream_max_retries();
     let mut retry_state = ResponsesStreamRetryState::default();
     let mut initial_input = Some(input);
     let mut original_input = None;
@@ -2176,20 +2176,35 @@ async fn try_run_sampling_request(
         .features
         .enabled(Feature::ConcurrentReasoningSummaries)
         && turn_context.provider.info().is_openai();
-    let mut stream = client_session
-        .stream(
-            prompt,
-            &step_context.model_info,
-            &step_context.session_telemetry,
-            step_context.reasoning_effort.clone(),
-            step_context.reasoning_summary,
-            step_context.service_tier.clone(),
-            responses_metadata,
-            &inference_trace,
-        )
-        .instrument(trace_span!("stream_request"))
-        .or_cancel(&cancellation_token)
-        .await??;
+    let stream_idle_timeout = turn_context.config.model_provider.stream_idle_timeout();
+    let mut stream = match tokio::time::timeout(
+        stream_idle_timeout,
+        client_session
+            .stream(
+                prompt,
+                &step_context.model_info,
+                &step_context.session_telemetry,
+                step_context.reasoning_effort.clone(),
+                step_context.reasoning_summary,
+                step_context.service_tier.clone(),
+                responses_metadata,
+                &inference_trace,
+            )
+            .instrument(trace_span!("stream_request"))
+            .or_cancel(&cancellation_token),
+    )
+    .await
+    {
+        Ok(Ok(stream)) => stream?,
+        Ok(Err(codex_async_utils::CancelErr::Cancelled)) => {
+            return Err(CodexErr::TurnAborted);
+        }
+        Err(_) => {
+            return Err(CodexErr::Stream(format!(
+                "idle timeout waiting for response stream after {stream_idle_timeout:?}"
+            )));
+        }
+    };
     let mut in_flight: FuturesOrdered<BoxFuture<'static, CodexResult<ResponseInputItem>>> =
         FuturesOrdered::new();
     let mut needs_follow_up = false;
@@ -2232,7 +2247,6 @@ async fn try_run_sampling_request(
             codex.usage.total_tokens = field::Empty,
         );
 
-        let stream_idle_timeout = turn_context.provider.info().stream_idle_timeout();
         let event = match tokio::time::timeout(
             stream_idle_timeout,
             stream
