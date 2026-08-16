@@ -28,6 +28,10 @@ use codex_history::RolloutItem;
 use codex_login::AuthManager;
 use codex_login::CodexAuth;
 use codex_model_provider::create_model_provider;
+use codex_model_provider_info::AMAZON_BEDROCK_GPT_5_6_LUNA_MODEL_ID;
+use codex_model_provider_info::AMAZON_BEDROCK_GPT_5_6_SOL_MODEL_ID;
+use codex_model_provider_info::AMAZON_BEDROCK_PROVIDER_ID;
+use codex_model_provider_info::ModelProviderInfo;
 use codex_model_provider_info::built_in_model_providers;
 use codex_protocol::AgentPath;
 use codex_protocol::ThreadId;
@@ -333,6 +337,115 @@ async fn spawn_agent_uses_explorer_role_and_preserves_approval_policy() {
         .await;
     assert_eq!(snapshot.approval_policy, AskForApproval::OnRequest);
     assert_eq!(snapshot.model_provider_id, "ollama");
+}
+
+#[tokio::test]
+async fn mantle_fresh_context_luna_role_stays_on_bedrock() {
+    #[derive(Debug, Deserialize)]
+    struct SpawnAgentResult {
+        agent_id: String,
+    }
+
+    let (mut session, mut turn) = make_session_and_context().await;
+    tokio::fs::create_dir_all(&turn.config.codex_home)
+        .await
+        .expect("codex home should be created");
+    let role_config_path = turn.config.codex_home.as_path().join("luna-worker.toml");
+    tokio::fs::write(
+        &role_config_path,
+        r#"model = "gpt-5.6-luna"
+model_provider = "openai"
+model_reasoning_effort = "xhigh"
+"#,
+    )
+    .await
+    .expect("role config should be written");
+
+    let mut config = (*turn.config).clone();
+    let _ = config.features.enable(Feature::MultiAgentV2);
+    let provider_info = ModelProviderInfo::create_amazon_bedrock_provider(/*aws*/ None);
+    config.model_provider_id = AMAZON_BEDROCK_PROVIDER_ID.to_string();
+    config.model_provider = provider_info.clone();
+    config.agent_roles.insert(
+        "luna-worker".to_string(),
+        AgentRoleConfig {
+            description: Some("Mantle Luna worker".to_string()),
+            config_file: Some(role_config_path),
+            nickname_candidates: None,
+        },
+    );
+    set_turn_config(&mut turn, config);
+    turn.provider = create_model_provider(provider_info, turn.auth_manager.clone());
+    Arc::make_mut(&mut turn.model_info).slug = AMAZON_BEDROCK_GPT_5_6_SOL_MODEL_ID.to_string();
+
+    let manager = thread_manager();
+    let root = manager
+        .start_thread(StartThreadOptions::new((*turn.config).clone()))
+        .await
+        .expect("root thread should start");
+    session.services.agent_control = manager.agent_control();
+    session.thread_id = root.thread_id;
+
+    let output = SpawnAgentHandler::default()
+        .handle(invocation(
+            Arc::new(session),
+            Arc::new(turn),
+            "spawn_agent",
+            function_payload(json!({
+                "message": "inspect this repo",
+                "agent_type": "luna-worker",
+                "fork_context": false
+            })),
+        ))
+        .await
+        .expect("fresh-context Mantle Luna spawn should succeed");
+    let (content, _) = expect_text_output(output);
+    let result: SpawnAgentResult =
+        serde_json::from_str(&content).expect("spawn_agent result should be json");
+    let snapshot = manager
+        .get_thread(parse_agent_id(&result.agent_id))
+        .await
+        .expect("spawned agent thread should exist")
+        .config_snapshot()
+        .await;
+
+    assert_eq!(snapshot.model_provider_id, AMAZON_BEDROCK_PROVIDER_ID);
+    assert_eq!(snapshot.model, AMAZON_BEDROCK_GPT_5_6_LUNA_MODEL_ID);
+}
+
+#[tokio::test]
+async fn mantle_cached_delegation_rejects_full_history_forks() {
+    let (session, mut turn) = make_session_and_context().await;
+    let mut config = (*turn.config).clone();
+    let _ = config.features.enable(Feature::MultiAgentV2);
+    let provider_info = ModelProviderInfo::create_amazon_bedrock_provider(/*aws*/ None);
+    config.model_provider_id = AMAZON_BEDROCK_PROVIDER_ID.to_string();
+    config.model_provider = provider_info.clone();
+    set_turn_config(&mut turn, config);
+    turn.provider = create_model_provider(provider_info, turn.auth_manager.clone());
+    Arc::make_mut(&mut turn.model_info).slug = AMAZON_BEDROCK_GPT_5_6_SOL_MODEL_ID.to_string();
+
+    let err = SpawnAgentHandler::default()
+        .handle(invocation(
+            Arc::new(session),
+            Arc::new(turn),
+            "spawn_agent",
+            function_payload(json!({
+                "message": "inspect this repo",
+                "fork_context": true
+            })),
+        ))
+        .await
+        .err()
+        .expect("Mantle cached delegation must reject full-history forks");
+
+    assert_eq!(
+        err,
+        FunctionCallError::RespondToModel(
+            "fork_context=true is unavailable for Mantle cached delegation; use a fresh-context Luna agent"
+                .to_string(),
+        )
+    );
 }
 
 #[tokio::test]

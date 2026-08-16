@@ -2563,31 +2563,48 @@ async fn multi_agent_v2_can_use_configured_tool_namespace() {
 }
 
 #[tokio::test]
-async fn multi_agent_v2_namespace_is_supported_by_bedrock_provider() {
+async fn mantle_explicit_cache_uses_fresh_context_v1_tools() {
     let plan = probe(|turn| {
         set_feature(turn, Feature::MultiAgentV2, /*enabled*/ true);
-        update_config(turn, |config| {
-            config.multi_agent_v2.tool_namespace = Some("agents".to_string());
-        });
         use_bedrock_provider(turn);
+        Arc::make_mut(&mut turn.model_info).slug = AMAZON_BEDROCK_GPT_5_6_SOL_MODEL_ID.to_string();
     })
     .await;
 
-    plan.assert_visible_contains(&["agents"]);
-    plan.assert_visible_lacks(&["spawn_agent", "send_message", "list_agents"]);
+    plan.assert_visible_contains(&[MULTI_AGENT_V1_NAMESPACE]);
+    plan.assert_visible_lacks(&[MULTI_AGENT_V2_NAMESPACE]);
+    plan.assert_registered_contains(&[
+        &ToolName::namespaced(MULTI_AGENT_V1_NAMESPACE, "spawn_agent").to_string(),
+        &ToolName::namespaced(MULTI_AGENT_V1_NAMESPACE, "send_input").to_string(),
+    ]);
+    plan.assert_registered_lacks(&[
+        &ToolName::namespaced(MULTI_AGENT_V2_NAMESPACE, "spawn_agent").to_string(),
+        &ToolName::namespaced(MULTI_AGENT_V2_NAMESPACE, "send_message").to_string(),
+        &ToolName::namespaced(MULTI_AGENT_V2_NAMESPACE, "followup_task").to_string(),
+    ]);
+    let ToolSpec::Namespace(namespace) = plan.visible_spec(MULTI_AGENT_V1_NAMESPACE) else {
+        panic!("expected Mantle v1 namespace");
+    };
+    let Some(ResponsesApiNamespaceTool::Function(spawn_agent)) =
+        namespace.tools.iter().find(|tool| {
+            matches!(
+                tool,
+                ResponsesApiNamespaceTool::Function(tool) if tool.name == "spawn_agent"
+            )
+        })
+    else {
+        panic!("expected Mantle v1 spawn_agent function");
+    };
     assert!(
-        !plan
-            .registered_names
-            .contains(&ToolName::plain("spawn_agent").to_string())
+        spawn_agent
+            .description
+            .contains("fresh-context GPT-5.6 Luna")
     );
-    assert!(
-        plan.registered_names
-            .contains(&ToolName::namespaced("agents", "spawn_agent").to_string())
-    );
+    assert!(spawn_agent.description.contains("Leave fork_context false"));
 }
 
 #[tokio::test]
-async fn multi_agent_v2_bedrock_workers_only_delegate_when_model_supports_v2() {
+async fn bedrock_workers_only_delegate_when_model_supports_it() {
     for (model, model_multi_agent_version, supports_delegation) in [
         (
             AMAZON_BEDROCK_GPT_5_6_SOL_MODEL_ID,
@@ -2619,14 +2636,17 @@ async fn multi_agent_v2_bedrock_workers_only_delegate_when_model_supports_v2() {
         })
         .await;
 
-        let spawn_agent_name = ToolName::namespaced("agents", "spawn_agent").to_string();
-        let followup_task_name = ToolName::namespaced("agents", "followup_task").to_string();
+        let spawn_agent_name =
+            ToolName::namespaced(MULTI_AGENT_V1_NAMESPACE, "spawn_agent").to_string();
+        let send_input_name =
+            ToolName::namespaced(MULTI_AGENT_V1_NAMESPACE, "send_input").to_string();
         if supports_delegation {
-            plan.assert_visible_contains(&["agents"]);
-            plan.assert_registered_contains(&[&spawn_agent_name, &followup_task_name]);
-        } else {
+            plan.assert_visible_contains(&[MULTI_AGENT_V1_NAMESPACE]);
             plan.assert_visible_lacks(&["agents"]);
-            plan.assert_registered_lacks(&[&spawn_agent_name, &followup_task_name]);
+            plan.assert_registered_contains(&[&spawn_agent_name, &send_input_name]);
+        } else {
+            plan.assert_visible_lacks(&[MULTI_AGENT_V1_NAMESPACE, "agents"]);
+            plan.assert_registered_lacks(&[&spawn_agent_name, &send_input_name]);
         }
     }
 }

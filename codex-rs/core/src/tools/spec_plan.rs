@@ -41,6 +41,7 @@ use crate::tools::handlers::multi_agents::WaitAgentHandler;
 use crate::tools::handlers::multi_agents_common::DEFAULT_WAIT_TIMEOUT_MS;
 use crate::tools::handlers::multi_agents_common::MAX_WAIT_TIMEOUT_MS;
 use crate::tools::handlers::multi_agents_common::MIN_WAIT_TIMEOUT_MS;
+use crate::tools::handlers::multi_agents_common::mantle_explicit_cache_requires_fresh_context;
 use crate::tools::handlers::multi_agents_spec::SpawnAgentToolOptions;
 use crate::tools::handlers::multi_agents_spec::WaitAgentTimeoutOptions;
 use crate::tools::handlers::multi_agents_v2::FollowupTaskHandler as FollowupTaskHandlerV2;
@@ -63,6 +64,7 @@ use crate::tools::tool_namespaces_info::collect_tool_namespaces_info;
 use codex_extension_api::ExtensionData;
 use codex_features::Feature;
 use codex_login::AuthManager;
+use codex_model_provider_info::AMAZON_BEDROCK_GPT_5_6_LUNA_MODEL_ID;
 use codex_protocol::DEFAULT_FUNCTION_NAMESPACE;
 use codex_protocol::account::PlanType;
 use codex_protocol::config_types::WebSearchMode;
@@ -595,6 +597,7 @@ fn namespace_tools_enabled(turn_context: &TurnContext) -> bool {
 
 fn multi_agent_v2_enabled(turn_context: &TurnContext) -> bool {
     turn_context.multi_agent_version == MultiAgentVersion::V2
+        && !mantle_explicit_cache_requires_fresh_context(turn_context)
 }
 
 fn collab_tools_enabled(turn_context: &TurnContext) -> bool {
@@ -1189,6 +1192,7 @@ fn add_collaboration_tools(context: &CoreToolPlanContext<'_>, registry: &mut Too
                 exposure,
             );
         } else {
+            let mantle_fresh_context = mantle_explicit_cache_requires_fresh_context(turn_context);
             let agent_type_description =
                 agent_type_description(turn_context, context.default_agent_type_description);
             let exposure = if search_tool_enabled(turn_context) {
@@ -1198,13 +1202,27 @@ fn add_collaboration_tools(context: &CoreToolPlanContext<'_>, registry: &mut Too
             };
             registry.add_with_exposure(
                 SpawnAgentHandler::new(SpawnAgentToolOptions {
-                    available_models: turn_context.available_models.clone(),
+                    available_models: turn_context
+                        .available_models
+                        .iter()
+                        .filter(|model| {
+                            !mantle_fresh_context
+                                || matches!(
+                                    model.model.as_str(),
+                                    "gpt-5.6-luna" | AMAZON_BEDROCK_GPT_5_6_LUNA_MODEL_ID
+                                )
+                        })
+                        .cloned()
+                        .collect(),
                     agent_type_description,
                     expose_agent_type: !turn_context.config.agent_roles.is_empty(),
                     hide_agent_type_model_reasoning: false,
                     expose_spawn_agent_model_overrides: true,
-                    multi_agent_version: turn_context.multi_agent_version,
-                    usage_hint_text: turn_context.config.multi_agent_v2.usage_hint_text.clone(),
+                    multi_agent_version: MultiAgentVersion::V1,
+                    usage_hint_text: mantle_fresh_context.then(|| {
+                        "Mantle cached delegation creates fresh-context GPT-5.6 Luna agents. Leave fork_context false; full-history forks are unavailable."
+                            .to_string()
+                    }).or_else(|| turn_context.config.multi_agent_v2.usage_hint_text.clone()),
                 }),
                 exposure,
             );

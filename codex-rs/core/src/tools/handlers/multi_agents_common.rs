@@ -10,6 +10,7 @@ use crate::session::turn_context::TurnEnvironment;
 use crate::tools::context::FunctionToolOutput;
 use crate::tools::context::ToolOutput;
 use crate::tools::context::ToolPayload;
+use codex_model_provider_info::AMAZON_BEDROCK_GPT_5_6_LUNA_MODEL_ID;
 use codex_models_manager::manager::RefreshStrategy;
 use codex_protocol::AgentPath;
 use codex_protocol::ThreadId;
@@ -32,6 +33,39 @@ pub(crate) const MIN_WAIT_TIMEOUT_MS: i64 = DEFAULT_MULTI_AGENT_V2_MIN_WAIT_TIME
 pub(crate) const DEFAULT_WAIT_TIMEOUT_MS: i64 = 30_000;
 pub(crate) const MAX_WAIT_TIMEOUT_MS: i64 = HARD_MAX_MULTI_AGENT_V2_TIMEOUT_MS;
 pub(crate) const MAX_SPAWN_AGENT_MODEL_OVERRIDES: usize = 5;
+
+pub(crate) fn mantle_explicit_cache_requires_fresh_context(turn: &TurnContext) -> bool {
+    turn.provider.info().is_amazon_bedrock()
+        && turn
+            .provider
+            .prompt_cache_options(&turn.model_info.slug)
+            .is_some()
+}
+
+pub(crate) fn pin_mantle_fresh_context_agent_to_luna(
+    config: &mut Config,
+    turn: &TurnContext,
+) -> Result<(), FunctionCallError> {
+    if !mantle_explicit_cache_requires_fresh_context(turn) {
+        return Ok(());
+    }
+
+    let selected_model = config.model.as_deref().unwrap_or(&turn.model_info.slug);
+    if selected_model != turn.model_info.slug
+        && selected_model != "gpt-5.6-luna"
+        && selected_model != AMAZON_BEDROCK_GPT_5_6_LUNA_MODEL_ID
+    {
+        return Err(FunctionCallError::RespondToModel(
+            "Mantle cached delegation currently supports only fresh-context GPT-5.6 Luna agents"
+                .to_string(),
+        ));
+    }
+
+    config.model_provider_id = turn.config.model_provider_id.clone();
+    config.model_provider = turn.provider.info().clone();
+    config.model = Some(AMAZON_BEDROCK_GPT_5_6_LUNA_MODEL_ID.to_string());
+    Ok(())
+}
 
 pub(crate) fn model_supports_multi_agent_backend(
     model: &ModelPreset,

@@ -20,6 +20,7 @@ use codex_login::auth::AgentIdentityAuth;
 use codex_login::auth::AgentIdentityAuthRecord;
 use codex_login::auth::BedrockApiKeyAuth;
 use codex_model_provider_info::AMAZON_BEDROCK_GPT_5_5_MODEL_ID;
+use codex_model_provider_info::AMAZON_BEDROCK_GPT_5_6_SOL_MODEL_ID;
 use codex_model_provider_info::AMAZON_BEDROCK_PROVIDER_ID;
 use codex_model_provider_info::ModelProviderInfo;
 use codex_protocol::AgentPath;
@@ -449,7 +450,10 @@ fn assert_compact_request_omits_harness_metadata(request: &responses::ResponsesR
 async fn amazon_bedrock_uses_remote_compaction_endpoint() -> Result<()> {
     skip_if_no_network!(Ok(()));
 
-    let harness = TestCodexHarness::with_auto_env_builder(amazon_bedrock_test_codex()).await?;
+    let harness = TestCodexHarness::with_auto_env_builder(
+        amazon_bedrock_test_codex().with_model(AMAZON_BEDROCK_GPT_5_6_SOL_MODEL_ID),
+    )
+    .await?;
 
     let response_mock = responses::mount_sse_sequence(
         harness.server(),
@@ -490,11 +494,14 @@ async fn amazon_bedrock_uses_remote_compaction_endpoint() -> Result<()> {
     );
     assert_eq!(
         compact_request.body_json()["model"],
-        AMAZON_BEDROCK_GPT_5_5_MODEL_ID
+        AMAZON_BEDROCK_GPT_5_6_SOL_MODEL_ID
     );
 
     let response_requests = response_mock.requests();
     assert_eq!(response_requests.len(), 2);
+    assert!(response_requests.iter().all(|request| {
+        request.body_json()["prompt_cache_options"] == json!({"mode": "explicit"})
+    }));
     assert!(
         response_requests
             .iter()
@@ -504,6 +511,17 @@ async fn amazon_bedrock_uses_remote_compaction_endpoint() -> Result<()> {
         item["type"] == "compaction"
             && item["encrypted_content"] == "BEDROCK_REMOTE_COMPACTED_SUMMARY"
     }));
+    for role in ["developer", "user"] {
+        assert!(response_requests[1].input().iter().any(|item| {
+            item["type"] == "message"
+                && item["role"] == role
+                && item["content"].as_array().is_some_and(|content| {
+                    content.iter().any(|block| {
+                        block["prompt_cache_breakpoint"] == json!({"mode": "explicit"})
+                    })
+                })
+        }));
+    }
 
     Ok(())
 }
