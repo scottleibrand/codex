@@ -12,6 +12,7 @@ use codex_config::ThreadConfigLoader;
 use codex_core::config::Config;
 use codex_core::resolve_installation_id;
 use codex_login::AuthManager;
+use codex_model_provider::AMAZON_BEDROCK_PROVIDER_ID;
 #[cfg(debug_assertions)]
 use codex_utils_absolute_path::AbsolutePathBuf;
 use codex_utils_cli::CliConfigOverrides;
@@ -505,15 +506,18 @@ pub async fn run_main_with_transport_options(
             let discovered_thread_config_loader = configured_thread_config_loader(&config);
             config_manager
                 .replace_thread_config_loader(Arc::clone(&discovered_thread_config_loader));
-            let auth_manager =
-                AuthManager::shared_from_config(&config, /*enable_codex_api_key_env*/ false)
-                    .await
-                    .map_err(std::io::Error::other)?;
-            config_manager.replace_cloud_config_bundle_loader(
-                auth_manager,
-                config.chatgpt_base_url.clone(),
-                config.http_client_factory(),
-            );
+            if should_install_cloud_config_bundle_loader(&config.model_provider_id) {
+                let auth_manager = AuthManager::shared_from_config(
+                    &config, /*enable_codex_api_key_env*/ false,
+                )
+                .await
+                .map_err(std::io::Error::other)?;
+                config_manager.replace_cloud_config_bundle_loader(
+                    auth_manager,
+                    config.chatgpt_base_url.clone(),
+                    config.http_client_factory(),
+                );
+            }
         }
         Err(err) => {
             warn!(error = %err, "Failed to preload config for cloud config bundle");
@@ -1369,6 +1373,10 @@ fn loader_overrides_with_test_user_config_file(
     Ok(loader_overrides)
 }
 
+fn should_install_cloud_config_bundle_loader(model_provider_id: &str) -> bool {
+    model_provider_id != AMAZON_BEDROCK_PROVIDER_ID
+}
+
 fn analytics_rpc_transport(transport: &AppServerTransport) -> AppServerRpcTransport {
     match transport {
         AppServerTransport::Stdio => AppServerRpcTransport::Stdio,
@@ -1383,8 +1391,10 @@ mod tests {
     use super::LogFormat;
     #[cfg(debug_assertions)]
     use super::loader_overrides_with_test_user_config_file;
+    use super::should_install_cloud_config_bundle_loader;
     #[cfg(debug_assertions)]
     use codex_config::LoaderOverrides;
+    use codex_model_provider::AMAZON_BEDROCK_PROVIDER_ID;
     #[cfg(debug_assertions)]
     use codex_utils_absolute_path::AbsolutePathBuf;
     use pretty_assertions::assert_eq;
@@ -1405,6 +1415,15 @@ mod tests {
         assert_eq!(LogFormat::from_env_value(Some("")), LogFormat::Default);
         assert_eq!(LogFormat::from_env_value(Some("text")), LogFormat::Default);
         assert_eq!(LogFormat::from_env_value(Some("jsonl")), LogFormat::Default);
+    }
+
+    #[test]
+    fn cloud_config_bundle_loader_is_skipped_only_for_bedrock() {
+        assert!(!should_install_cloud_config_bundle_loader(
+            AMAZON_BEDROCK_PROVIDER_ID
+        ));
+        assert!(should_install_cloud_config_bundle_loader("openai"));
+        assert!(should_install_cloud_config_bundle_loader("custom"));
     }
 
     #[cfg(debug_assertions)]
