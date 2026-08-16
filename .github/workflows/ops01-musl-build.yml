@@ -1,0 +1,99 @@
+name: ops01-musl-build
+
+on:
+  push:
+    branches:
+      - build/ops01-mantle-fcce07eb45
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    env:
+      TARGET: x86_64-unknown-linux-musl
+      CARGO_NET_GIT_FETCH_WITH_CLI: true
+      AWS_LC_SYS_NO_JITTER_ENTROPY: 1
+      AWS_LC_SYS_NO_JITTER_ENTROPY_x86_64_unknown_linux_musl: 1
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+        with:
+          persist-credentials: false
+
+      - uses: dtolnay/rust-toolchain@e081816240890017053eacbb1bdf337761dc5582
+        with:
+          toolchain: 1.95.0
+          targets: x86_64-unknown-linux-musl
+
+      - name: Install Zig
+        uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29
+        with:
+          version: 0.14.0
+          use-cache: false
+
+      - name: Install musl build tools
+        env:
+          TARGET: x86_64-unknown-linux-musl
+        run: bash .github/scripts/install-musl-build-tools.sh
+
+      - name: Configure verified rusty_v8 artifacts
+        uses: ./.github/actions/setup-rusty-v8
+        with:
+          target: x86_64-unknown-linux-musl
+
+      - name: Build and finalize bwrap
+        working-directory: codex-rs
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo build --locked --target "$TARGET" --release --bin bwrap
+          bwrap="target/$TARGET/release/bwrap"
+          strip --strip-debug --strip-unneeded "$bwrap"
+          digest="$(sha256sum "$bwrap" | awk '{print $1}')"
+          echo "CODEX_BWRAP_SHA256=$digest" >> "$GITHUB_ENV"
+
+      - name: Build Codex package binaries
+        working-directory: codex-rs
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo build --locked --target "$TARGET" --release --bin codex --bin codex-code-mode-host
+          strip --strip-debug --strip-unneeded "target/$TARGET/release/codex"
+          strip --strip-debug --strip-unneeded "target/$TARGET/release/codex-code-mode-host"
+
+      - name: Build canonical package archive
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "dist/$TARGET"
+          python3 scripts/build_codex_package.py \
+            --target "$TARGET" \
+            --variant codex \
+            --entrypoint-bin "codex-rs/target/$TARGET/release/codex" \
+            --code-mode-host-bin "codex-rs/target/$TARGET/release/codex-code-mode-host" \
+            --bwrap-bin "codex-rs/target/$TARGET/release/bwrap" \
+            --cargo-profile release \
+            --package-dir "dist/$TARGET/package" \
+            --archive-output "dist/$TARGET/codex-package-$TARGET.tar.gz" \
+            --force
+
+      - name: Smoke-test and checksum package
+        shell: bash
+        run: |
+          set -euo pipefail
+          package="dist/$TARGET/package"
+          "$package/bin/codex" --version
+          file "$package/bin/codex" "$package/bin/codex-code-mode-host" "$package/codex-resources/bwrap"
+          tar -tzf "dist/$TARGET/codex-package-$TARGET.tar.gz" > "dist/$TARGET/archive-contents.txt"
+          sha256sum "dist/$TARGET/codex-package-$TARGET.tar.gz" "$package/bin/codex" "$package/codex-resources/bwrap" > "dist/$TARGET/SHA256SUMS"
+          printf "source_commit=%s\nsource_branch=%s\ntarget=%s\n" "$GITHUB_SHA" "$GITHUB_REF_NAME" "$TARGET" > "dist/$TARGET/BUILD-METADATA.txt"
+
+      - name: Upload ops01 package
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f
+        with:
+          name: ops01-codex-fcce07eb45-x86_64-musl
+          path: dist/x86_64-unknown-linux-musl/
+          if-no-files-found: error
+          retention-days: 14
