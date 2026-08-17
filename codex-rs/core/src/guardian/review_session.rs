@@ -295,6 +295,17 @@ where
     }
 }
 
+pub(super) async fn parent_history_supports_fresh_guardian_retry(session: &Session) -> bool {
+    let history = session.clone_history().await;
+    let has_compaction = history.raw_items().any(|item| {
+        matches!(
+            item,
+            ResponseItem::Compaction { .. } | ResponseItem::ContextCompaction { .. }
+        )
+    });
+    !has_compaction || encrypted_parent_compaction(history.raw_items()).is_some()
+}
+
 pub(crate) fn prompt_cache_key_override_for_review_session(
     session_source: &SessionSource,
     parent_thread_id: Option<ThreadId>,
@@ -1320,12 +1331,16 @@ async fn wait_for_guardian_review(
                             if turn_complete.last_agent_message.is_none()
                                 && let Some(error) = last_error
                             {
+                                let keep_review_session = !matches!(
+                                    error.codex_error_info,
+                                    Some(CodexErrorInfo::ContextWindowExceeded)
+                                );
                                 return (
                                     GuardianReviewSessionOutcome::SessionFailed {
                                         error: anyhow!(error.message),
                                         error_info: error.codex_error_info,
                                     },
-                                    true,
+                                    keep_review_session,
                                     true,
                                 );
                             }
