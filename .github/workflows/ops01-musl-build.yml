@@ -3,7 +3,7 @@ name: ops01-musl-build
 on:
   push:
     branches:
-      - build/ops01-mantle-6ed6a5efe3
+      - build/ops01-mantle-44463c1498
 
 permissions:
   contents: read
@@ -93,7 +93,7 @@ jobs:
       - name: Upload ops01 package
         uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f
         with:
-          name: ops01-codex-6ed6a5efe3-x86_64-musl
+          name: ops01-codex-44463c1498-x86_64-musl
           path: dist/x86_64-unknown-linux-musl/
           if-no-files-found: error
           retention-days: 14
