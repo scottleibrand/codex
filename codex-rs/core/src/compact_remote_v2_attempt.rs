@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use super::RemoteCompactionV2Output;
+use super::replace_historical_input_images_before_last_compaction;
 use super::run_remote_compaction_request_v2;
 use crate::Prompt;
 use crate::client::ModelClientSession;
@@ -73,6 +74,15 @@ pub(super) async fn run_remote_compact_v2_attempt(
         .into_iter()
         .map(|envelope| (envelope.item, envelope.metadata))
         .unzip();
+    let omitted_historical_images =
+        replace_historical_input_images_before_last_compaction(&mut input);
+    if omitted_historical_images > 0 {
+        info!(
+            turn_id = %turn_context.sub_id,
+            omitted_historical_images,
+            "omitted historical images before repeat remote compaction v2"
+        );
+    }
     let tool_router = &step_context.tool_router;
     input.push(ResponseItem::CompactionTrigger {});
     let prompt = Prompt {
