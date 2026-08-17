@@ -53,6 +53,7 @@ use super::prompt::parse_guardian_assessment;
 use super::review_session::GuardianReviewSessionOutcome;
 use super::review_session::GuardianReviewSessionParams;
 use super::review_session::build_guardian_review_session_config;
+use super::review_session::parent_history_supports_fresh_guardian_retry;
 
 const GUARDIAN_REJECTION_INSTRUCTIONS: &str = concat!(
     "The agent must not attempt to achieve the same outcome via workaround, ",
@@ -987,6 +988,11 @@ pub(super) async fn run_guardian_review_session_with_retry(
         if attempt_count >= max_attempts || !should_retry_guardian_review(&outcome) {
             return (outcome, analytics_result);
         }
+        if guardian_review_requires_fresh_trunk(&outcome)
+            && !parent_history_supports_fresh_guardian_retry(session.as_ref()).await
+        {
+            return (outcome, analytics_result);
+        }
         if let Some(error) =
             wait_before_guardian_retry(attempt_count, deadline, external_cancel.as_ref()).await
         {
@@ -1017,6 +1023,16 @@ async fn wait_before_guardian_retry(
     }
 }
 
+fn guardian_review_requires_fresh_trunk(outcome: &GuardianReviewOutcome) -> bool {
+    matches!(
+        outcome,
+        GuardianReviewOutcome::Error(GuardianReviewError::Session {
+            error_info: Some(CodexErrorInfo::ContextWindowExceeded),
+            ..
+        })
+    )
+}
+
 fn should_retry_guardian_review(outcome: &GuardianReviewOutcome) -> bool {
     matches!(
         outcome,
@@ -1024,6 +1040,7 @@ fn should_retry_guardian_review(outcome: &GuardianReviewOutcome) -> bool {
             GuardianReviewError::Session {
                 error_info: Some(
                     CodexErrorInfo::ServerOverloaded
+                        | CodexErrorInfo::ContextWindowExceeded
                         | CodexErrorInfo::HttpConnectionFailed { .. }
                         | CodexErrorInfo::ResponseStreamConnectionFailed { .. }
                         | CodexErrorInfo::InternalServerError
@@ -1078,6 +1095,7 @@ mod review_tests {
             rationale: "deny".to_string(),
         };
         let transient_error_info = [
+            CodexErrorInfo::ContextWindowExceeded,
             CodexErrorInfo::ServerOverloaded,
             CodexErrorInfo::HttpConnectionFailed {
                 http_status_code: Some(502),

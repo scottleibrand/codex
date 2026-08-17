@@ -11,6 +11,7 @@ use crate::guardian::approval_request::guardian_request_target_item_id;
 use crate::guardian::prompt::BUNDLED_GUARDIAN_POLICY;
 use crate::guardian::prompt::BUNDLED_GUARDIAN_POLICY_TEMPLATE;
 use crate::guardian::prompt::guardian_policy_prompt_with_config_and_template;
+use crate::guardian::review::GuardianReviewError;
 use crate::guardian::review::guardian_review_session_config;
 use crate::guardian::review::routes_approval_to_guardian_with_reviewer;
 use crate::session::session::Session;
@@ -50,6 +51,7 @@ use codex_protocol::permissions::FileSystemSandboxEntry;
 use codex_protocol::permissions::FileSystemSandboxPolicy;
 use codex_protocol::permissions::NetworkSandboxPolicy;
 use codex_protocol::protocol::AskForApproval;
+use codex_protocol::protocol::CodexErrorInfo;
 use codex_protocol::protocol::Event;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::GranularApprovalConfig;
@@ -2743,6 +2745,219 @@ async fn guardian_review_surfaces_responses_api_errors_in_rejection_reason() -> 
         "rejection message should include guardian rationale: {rejection}"
     );
 
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn guardian_context_overflow_discards_reused_trunk_before_retry() -> anyhow::Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let server = start_mock_server().await;
+    let first_rationale = "prior guardian rationale that must not survive trunk reset";
+    let first_approval = serde_json::json!({
+        "risk_level": "low",
+        "user_authorization": "high",
+        "outcome": "allow",
+        "rationale": first_rationale,
+    })
+    .to_string();
+    let retry_approval = serde_json::json!({
+        "risk_level": "low",
+        "user_authorization": "high",
+        "outcome": "allow",
+        "rationale": "fresh guardian retry succeeded",
+    })
+    .to_string();
+    let explicit_authorization =
+        "The user explicitly approved this exact read-only process inspection.";
+    let request_log = mount_sse_sequence(
+        &server,
+        vec![
+            sse(vec![
+                ev_response_created("resp-seed-trunk"),
+                ev_assistant_message("msg-seed-trunk", &first_approval),
+                ev_completed("resp-seed-trunk"),
+            ]),
+            sse_failed(
+                "resp-context-overflow",
+                "context_length_exceeded",
+                "prompt tokens (1050861) exceed model maximum (1050000)",
+            ),
+            sse(vec![
+                ev_response_created("resp-fresh-retry"),
+                ev_assistant_message("msg-fresh-retry", &retry_approval),
+                ev_completed("resp-fresh-retry"),
+            ]),
+        ],
+    )
+    .await;
+    let (session, turn) = guardian_test_session_and_turn(&server).await;
+    seed_guardian_parent_history(&session, &turn).await;
+
+    let (seed_outcome, seed_metadata) = run_guardian_review_session_for_test(
+        Arc::clone(&session),
+        Arc::clone(&turn),
+        guardian_shell_request("shell-seed-trunk"),
+        ApprovalRequestReasons::default(),
+        guardian_output_schema(),
+        /*external_cancel*/ None,
+        /*max_attempts*/ 1,
+    )
+    .await;
+    assert!(matches!(
+        seed_outcome,
+        GuardianReviewOutcome::Completed(GuardianAssessment {
+            outcome: GuardianAssessmentOutcome::Allow,
+            ..
+        })
+    ));
+    assert!(matches!(
+        seed_metadata.guardian_session_kind,
+        Some(codex_analytics::GuardianReviewSessionKind::TrunkNew)
+    ));
+
+    let (outcome, metadata) = run_guardian_review_session_for_test(
+        Arc::clone(&session),
+        Arc::clone(&turn),
+        guardian_shell_request("shell-overflow-retry"),
+        ApprovalRequestReasons {
+            approval: Some(explicit_authorization.to_string()),
+            retry: None,
+        },
+        guardian_output_schema(),
+        /*external_cancel*/ None,
+        /*max_attempts*/ 3,
+    )
+    .await;
+
+    let GuardianReviewOutcome::Completed(assessment) = outcome else {
+        panic!("expected guardian assessment after a fresh-trunk retry");
+    };
+    assert_eq!(assessment.outcome, GuardianAssessmentOutcome::Allow);
+    assert_eq!(assessment.rationale, "fresh guardian retry succeeded");
+    assert_eq!(metadata.attempt_count, 2);
+    assert!(matches!(
+        metadata.guardian_session_kind,
+        Some(codex_analytics::GuardianReviewSessionKind::TrunkNew)
+    ));
+
+    let requests = request_log.requests();
+    assert_eq!(requests.len(), 3);
+    assert!(
+        requests[1].body_contains_text(first_rationale),
+        "the overflowing request should prove it reused the seeded guardian trunk"
+    );
+    assert!(
+        !requests[2].body_contains_text(first_rationale),
+        "the retry must not reuse the context-overflowed guardian trunk"
+    );
+    assert!(
+        requests[2].body_contains_text(explicit_authorization),
+        "the fresh retry must preserve current explicit user authorization"
+    );
+    assert!(
+        requests[2].body_contains_text(BUNDLED_GUARDIAN_POLICY),
+        "the fresh retry must retain the Guardian policy"
+    );
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn guardian_context_overflow_fails_closed_without_reconstructable_parent_summary()
+-> anyhow::Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let server = start_mock_server().await;
+    let seed_approval = serde_json::json!({
+        "risk_level": "low",
+        "user_authorization": "high",
+        "outcome": "allow",
+        "rationale": "seed guardian trunk",
+    })
+    .to_string();
+    let request_log = mount_sse_sequence(
+        &server,
+        vec![
+            sse(vec![
+                ev_response_created("resp-seed-incomplete-parent"),
+                ev_assistant_message("msg-seed-incomplete-parent", &seed_approval),
+                ev_completed("resp-seed-incomplete-parent"),
+            ]),
+            sse_failed(
+                "resp-incomplete-parent-overflow",
+                "context_length_exceeded",
+                "prompt tokens (1050861) exceed model maximum (1050000)",
+            ),
+        ],
+    )
+    .await;
+    let (session, turn) = guardian_test_session_and_turn(&server).await;
+    seed_guardian_parent_history(&session, &turn).await;
+
+    let (seed_outcome, _) = run_guardian_review_session_for_test(
+        Arc::clone(&session),
+        Arc::clone(&turn),
+        guardian_shell_request("shell-seed-incomplete-parent"),
+        ApprovalRequestReasons::default(),
+        guardian_output_schema(),
+        /*external_cancel*/ None,
+        /*max_attempts*/ 1,
+    )
+    .await;
+    assert!(matches!(
+        seed_outcome,
+        GuardianReviewOutcome::Completed(GuardianAssessment {
+            outcome: GuardianAssessmentOutcome::Allow,
+            ..
+        })
+    ));
+
+    session
+        .replace_history(
+            vec![
+                ResponseItem::Compaction {
+                    id: None,
+                    encrypted_content: String::new(),
+                    internal_chat_message_metadata_passthrough: None,
+                },
+                ResponseItem::Message {
+                    id: None,
+                    role: "user".to_string(),
+                    content: vec![ContentItem::InputText {
+                        text: "Continue after an incomplete parent compaction.".to_string(),
+                    }],
+                    phase: None,
+                    internal_chat_message_metadata_passthrough: None,
+                },
+            ],
+            /*reference_context_item*/ None,
+        )
+        .await;
+
+    let (outcome, metadata) = run_guardian_review_session_for_test(
+        Arc::clone(&session),
+        Arc::clone(&turn),
+        guardian_shell_request("shell-incomplete-parent-overflow"),
+        ApprovalRequestReasons::default(),
+        guardian_output_schema(),
+        /*external_cancel*/ None,
+        /*max_attempts*/ 3,
+    )
+    .await;
+
+    assert!(matches!(
+        outcome,
+        GuardianReviewOutcome::Error(GuardianReviewError::Session {
+            error_info: Some(CodexErrorInfo::ContextWindowExceeded),
+            ..
+        })
+    ));
+    assert_eq!(metadata.attempt_count, 1);
+    assert_eq!(
+        request_log.requests().len(),
+        2,
+        "Guardian must not consume the fresh response when parent context cannot be reconstructed"
+    );
     Ok(())
 }
 
