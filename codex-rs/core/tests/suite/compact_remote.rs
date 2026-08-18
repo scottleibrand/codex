@@ -450,6 +450,7 @@ fn assert_compact_request_omits_harness_metadata(request: &responses::ResponsesR
 async fn amazon_bedrock_uses_remote_compaction_endpoint() -> Result<()> {
     skip_if_no_network!(Ok(()));
 
+    let image_url = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/iZk9HQAAAABJRU5ErkJggg==";
     let harness = TestCodexHarness::with_auto_env_builder(
         amazon_bedrock_test_codex().with_model(AMAZON_BEDROCK_GPT_5_6_SOL_MODEL_ID),
     )
@@ -469,9 +470,32 @@ async fn amazon_bedrock_uses_remote_compaction_endpoint() -> Result<()> {
         ],
     )
     .await;
-    let compact_mock = responses::mount_compact_user_history_with_summary_once(
+    let compact_mock = responses::mount_compact_json_once(
         harness.server(),
-        "BEDROCK_REMOTE_COMPACTED_SUMMARY",
+        json!({
+            "output": [
+                ResponseItem::Message {
+                    id: None,
+                    role: "user".to_string(),
+                    content: vec![
+                        ContentItem::InputText {
+                            text: "BEDROCK_IMAGE_CONTEXT".to_string(),
+                        },
+                        ContentItem::InputImage {
+                            image_url: image_url.to_string(),
+                            detail: None,
+                        },
+                    ],
+                    phase: None,
+                    internal_chat_message_metadata_passthrough: None,
+                },
+                ResponseItem::Compaction {
+                    id: None,
+                    encrypted_content: "BEDROCK_REMOTE_COMPACTED_SUMMARY".to_string(),
+                    internal_chat_message_metadata_passthrough: None,
+                },
+            ],
+        }),
     )
     .await;
 
@@ -511,6 +535,15 @@ async fn amazon_bedrock_uses_remote_compaction_endpoint() -> Result<()> {
         item["type"] == "compaction"
             && item["encrypted_content"] == "BEDROCK_REMOTE_COMPACTED_SUMMARY"
     }));
+    assert!(
+        response_requests[1]
+            .message_input_image_urls("user")
+            .is_empty(),
+        "expected Bedrock V1 compacted history to omit retained image bytes"
+    );
+    let follow_up_body = response_requests[1].body_json().to_string();
+    assert!(follow_up_body.contains("BEDROCK_IMAGE_CONTEXT"));
+    assert!(follow_up_body.contains("[Image omitted after compaction]"));
     for role in ["developer", "user"] {
         assert!(response_requests[1].input().iter().any(|item| {
             item["type"] == "message"

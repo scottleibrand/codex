@@ -33,6 +33,7 @@ use codex_protocol::error::Result as CodexResult;
 use codex_protocol::items::ContextCompactionItem;
 use codex_protocol::items::TurnItem;
 use codex_protocol::models::BaseInstructions;
+use codex_protocol::models::ContentItem;
 use codex_protocol::models::FunctionCallOutputBody;
 use codex_protocol::models::FunctionCallOutputPayload;
 use codex_protocol::models::ResponseItem;
@@ -49,6 +50,7 @@ use request::run_remote_compact_attempt;
 
 const CONTEXT_WINDOW_TRUNCATED_OUTPUT_MESSAGE: &str =
     "Output exceeded the available model context and was truncated";
+pub(crate) const OMITTED_IMAGE_PLACEHOLDER: &str = "[Image omitted after compaction]";
 
 pub(crate) async fn run_inline_remote_auto_compact_task(
     sess: Arc<Session>,
@@ -341,14 +343,47 @@ pub(crate) async fn process_annotated_compacted_history(
     let (initial_context, world_state_baseline) =
         build_compaction_initial_context(sess, initial_context_injection).await;
 
-    let compacted_history = history_item_groups(compacted_history)
+    let mut compacted_history = history_item_groups(compacted_history)
         .filter(|group| should_keep_compacted_history_item(&group.source.item))
         .flat_map(HistoryItemGroup::into_items)
-        .collect();
+        .collect::<Vec<_>>();
+    replace_input_images_with_compaction_placeholder_in_envelopes(&mut compacted_history);
     (
         insert_initial_context_before_last_real_user_or_summary(compacted_history, initial_context),
         world_state_baseline,
     )
+}
+
+pub(crate) fn replace_input_images_with_compaction_placeholder_in_envelopes(
+    items: &mut [ResponseItemEnvelope],
+) -> usize {
+    let mut replaced = 0;
+    for envelope in items {
+        replaced += replace_input_images_with_compaction_placeholder(std::slice::from_mut(
+            &mut envelope.item,
+        ));
+    }
+    replaced
+}
+
+pub(crate) fn replace_input_images_with_compaction_placeholder(
+    items: &mut [ResponseItem],
+) -> usize {
+    let mut replaced = 0;
+    for item in items {
+        let ResponseItem::Message { content, .. } = item else {
+            continue;
+        };
+        for content_item in content {
+            if matches!(content_item, ContentItem::InputImage { .. }) {
+                *content_item = ContentItem::InputText {
+                    text: OMITTED_IMAGE_PLACEHOLDER.to_string(),
+                };
+                replaced += 1;
+            }
+        }
+    }
+    replaced
 }
 
 /// Returns whether an item from remote compaction output should be preserved.

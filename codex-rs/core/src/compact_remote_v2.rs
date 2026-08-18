@@ -13,6 +13,8 @@ use crate::compact::compaction_status_from_result;
 use crate::compact::insert_initial_context_before_last_real_user_or_summary;
 use crate::compact_model_fallback::record_model_fallback;
 use crate::compact_model_fallback::should_retry_with_current_model;
+use crate::compact_remote::replace_input_images_with_compaction_placeholder;
+use crate::compact_remote::replace_input_images_with_compaction_placeholder_in_envelopes;
 use crate::compact_remote::should_keep_compacted_history_item;
 use crate::compact_remote_history::HistoryItemGroup;
 use crate::compact_remote_history::history_item_groups;
@@ -64,7 +66,6 @@ use attempt::run_remote_compact_v2_attempt;
 // server-side path remains the reference implementation.
 pub(crate) const RETAINED_MESSAGE_TOKEN_BUDGET: usize = 64_000;
 const MAX_RETAINED_AGENT_MESSAGE_TOKENS: i64 = 10_000;
-const OMITTED_IMAGE_PLACEHOLDER: &str = "[Image omitted after compaction]";
 // Compact attempts can run much longer than normal turns, so keep the per-transport
 // retry budget smaller than the general Responses stream retry budget.
 const MAX_REMOTE_COMPACTION_V2_STREAM_RETRIES: u64 = 2;
@@ -500,36 +501,6 @@ fn replace_historical_input_images_before_last_compaction(items: &mut [ResponseI
     replace_input_images_with_compaction_placeholder(&mut items[..last_compaction_index])
 }
 
-fn replace_input_images_with_compaction_placeholder_in_envelopes(
-    items: &mut [ResponseItemEnvelope],
-) -> usize {
-    let mut replaced = 0;
-    for envelope in items {
-        replaced += replace_input_images_with_compaction_placeholder(std::slice::from_mut(
-            &mut envelope.item,
-        ));
-    }
-    replaced
-}
-
-fn replace_input_images_with_compaction_placeholder(items: &mut [ResponseItem]) -> usize {
-    let mut replaced = 0;
-    for item in items {
-        let ResponseItem::Message { content, .. } = item else {
-            continue;
-        };
-        for content_item in content {
-            if matches!(content_item, ContentItem::InputImage { .. }) {
-                *content_item = ContentItem::InputText {
-                    text: OMITTED_IMAGE_PLACEHOLDER.to_string(),
-                };
-                replaced += 1;
-            }
-        }
-    }
-    replaced
-}
-
 pub(crate) fn is_client_authored_developer_message(item: &ResponseItemEnvelope) -> bool {
     item.metadata
         .as_ref()
@@ -739,6 +710,7 @@ fn truncate_message_text_to_token_budget(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::compact_remote::OMITTED_IMAGE_PLACEHOLDER;
     use codex_protocol::models::ContentItem;
     use codex_protocol::models::MessagePhase;
     use pretty_assertions::assert_eq;
