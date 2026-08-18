@@ -13,11 +13,15 @@ use crate::compact::compaction_status_from_result;
 use crate::compact::insert_initial_context_before_last_real_user_or_summary;
 use crate::compact_model_fallback::record_model_fallback;
 use crate::compact_model_fallback::should_retry_with_current_model;
+#[cfg(test)]
+use crate::compact_remote::OMITTED_IMAGE_PLACEHOLDER;
 use crate::compact_remote::estimate_compacted_history_tokens;
 use crate::compact_remote::estimate_reference_context_item_tokens;
 use crate::compact_remote::insufficient_post_compaction_headroom;
 use crate::compact_remote::recover_from_remote_compact_context_overflow;
 use crate::compact_remote::remote_compact_error_is_context_overflow;
+use crate::compact_remote::replace_input_images_with_compaction_placeholder;
+use crate::compact_remote::replace_input_images_with_compaction_placeholder_in_envelopes;
 use crate::compact_remote::should_keep_compacted_history_item;
 use crate::compact_remote_history::HistoryItemGroup;
 use crate::compact_remote_history::history_item_groups;
@@ -71,7 +75,6 @@ use attempt::run_remote_compact_v2_attempt;
 // server-side path remains the reference implementation.
 pub(crate) const RETAINED_MESSAGE_TOKEN_BUDGET: usize = 64_000;
 const MAX_RETAINED_AGENT_MESSAGE_TOKENS: i64 = 10_000;
-const OMITTED_IMAGE_PLACEHOLDER: &str = "[Image omitted after compaction]";
 // Compact attempts can run much longer than normal turns, so keep the per-transport
 // retry budget smaller than the general Responses stream retry budget.
 const MAX_REMOTE_COMPACTION_V2_STREAM_RETRIES: u64 = 2;
@@ -530,7 +533,7 @@ fn build_v2_compacted_history(
         .map(|(item, metadata)| ResponseItemEnvelope { item, metadata })
         .collect::<Vec<_>>();
     replace_historical_input_images_before_last_compaction_in_envelopes(&mut prompt_input);
-    let retained = v2_history_item_groups(prompt_input)
+    let mut retained = v2_history_item_groups(prompt_input)
         .filter(|group| is_retained_for_remote_compaction_v2(&group.source.item))
         .filter(|group| {
             should_keep_compacted_history_item(&group.source.item)
@@ -539,6 +542,7 @@ fn build_v2_compacted_history(
         })
         .flat_map(HistoryItemGroup::into_items)
         .collect::<Vec<_>>();
+    replace_input_images_with_compaction_placeholder_in_envelopes(&mut retained);
     let mut retained =
         truncate_retained_messages_for_remote_compaction(retained, RETAINED_MESSAGE_TOKEN_BUDGET);
     let retained_image_count = retained
@@ -555,18 +559,6 @@ fn replace_historical_input_images_before_last_compaction(items: &mut [ResponseI
     };
 
     replace_input_images_with_compaction_placeholder(&mut items[..last_compaction_index])
-}
-
-fn replace_input_images_with_compaction_placeholder_in_envelopes(
-    items: &mut [ResponseItemEnvelope],
-) -> usize {
-    let mut replaced = 0;
-    for envelope in items {
-        replaced += replace_input_images_with_compaction_placeholder(std::slice::from_mut(
-            &mut envelope.item,
-        ));
-    }
-    replaced
 }
 
 fn replace_historical_input_images_before_last_compaction_in_envelopes(
@@ -589,24 +581,6 @@ fn is_compaction_boundary(item: &ResponseItem) -> bool {
         item,
         ResponseItem::Compaction { .. } | ResponseItem::ContextCompaction { .. }
     )
-}
-
-fn replace_input_images_with_compaction_placeholder(items: &mut [ResponseItem]) -> usize {
-    let mut replaced = 0;
-    for item in items {
-        let ResponseItem::Message { content, .. } = item else {
-            continue;
-        };
-        for content_item in content {
-            if matches!(content_item, ContentItem::InputImage { .. }) {
-                *content_item = ContentItem::InputText {
-                    text: OMITTED_IMAGE_PLACEHOLDER.to_string(),
-                };
-                replaced += 1;
-            }
-        }
-    }
-    replaced
 }
 
 pub(crate) fn is_client_authored_developer_message(item: &ResponseItemEnvelope) -> bool {
@@ -1067,7 +1041,7 @@ mod tests {
     }
 
     #[test]
-    fn build_v2_compacted_history_preserves_current_input_images() {
+    fn build_v2_compacted_history_strips_current_input_images() {
         let current_message = ResponseItem::Message {
             id: None,
             role: "user".to_string(),
@@ -1094,10 +1068,32 @@ mod tests {
         };
 
         let (history, retained_image_count) =
-            build_without_metadata(vec![current_message.clone()], output.clone());
+            build_without_metadata(vec![current_message], output.clone());
 
-        assert_eq!(raw(history), vec![current_message, output]);
-        assert_eq!(retained_image_count, 2);
+        assert_eq!(
+            raw(history),
+            vec![
+                ResponseItem::Message {
+                    id: None,
+                    role: "user".to_string(),
+                    content: vec![
+                        ContentItem::InputText {
+                            text: "user".to_string(),
+                        },
+                        ContentItem::InputText {
+                            text: OMITTED_IMAGE_PLACEHOLDER.to_string(),
+                        },
+                        ContentItem::InputText {
+                            text: OMITTED_IMAGE_PLACEHOLDER.to_string(),
+                        },
+                    ],
+                    phase: None,
+                    internal_chat_message_metadata_passthrough: None,
+                },
+                output,
+            ]
+        );
+        assert_eq!(retained_image_count, 0);
     }
 
     #[test]
@@ -1204,14 +1200,15 @@ mod tests {
         };
         let (first_history, first_retained_image_count) =
             build_without_metadata(vec![original], first_output);
-        assert_eq!(first_retained_image_count, 1);
+        assert_eq!(first_retained_image_count, 0);
         assert!(raw(first_history.clone()).iter().any(|item| {
             matches!(
                 item,
                 ResponseItem::Message { content, .. }
                     if content.iter().any(|content_item| matches!(
                         content_item,
-                        ContentItem::InputImage { .. }
+                        ContentItem::InputText { text }
+                            if text == OMITTED_IMAGE_PLACEHOLDER
                     ))
             )
         }));
