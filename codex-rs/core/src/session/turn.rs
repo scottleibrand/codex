@@ -1343,9 +1343,6 @@ async fn run_sampling_request(
         Arc::clone(&turn_diff_tracker),
     );
     let max_retries = turn_context.config.model_provider.stream_max_retries();
-    let sampling_timeout = turn_context.config.model_provider.sampling_timeout();
-    let sampling_deadline =
-        sampling_timeout.map(|timeout| (tokio::time::Instant::now() + timeout, timeout));
     let mut retry_state = ResponsesStreamRetryState::default();
     let mut initial_input = Some(input);
     let mut original_input = None;
@@ -1381,19 +1378,7 @@ async fn run_sampling_request(
             &prompt,
             cancellation_token.child_token(),
         );
-        let sampling_result = match sampling_deadline {
-            Some((deadline, timeout)) => {
-                match tokio::time::timeout_at(deadline, sampling_attempt).await {
-                    Ok(result) => result,
-                    Err(_) => {
-                        return Err(CodexErr::Stream(format!(
-                            "sampling deadline exceeded after {timeout:?}"
-                        )));
-                    }
-                }
-            }
-            None => sampling_attempt.await,
-        };
+        let sampling_result = sampling_attempt.await;
         let err = match sampling_result {
             Ok(output) => {
                 return Ok((output, original_input.unwrap_or(prompt.input)));
@@ -1431,17 +1416,7 @@ async fn run_sampling_request(
             &turn_context,
             ResponsesStreamRequest::Sampling,
         );
-        match sampling_deadline {
-            Some((deadline, timeout)) => match tokio::time::timeout_at(deadline, retry).await {
-                Ok(result) => result?,
-                Err(_) => {
-                    return Err(CodexErr::Stream(format!(
-                        "sampling deadline exceeded after {timeout:?}"
-                    )));
-                }
-            },
-            None => retry.await?,
-        }
+        retry.await?;
         turn_context.turn_timing_state.record_sampling_retry();
     }
 }
@@ -2231,6 +2206,9 @@ async fn try_run_sampling_request(
         }
     };
     let stream_idle_timeout = turn_context.config.model_provider.stream_idle_timeout();
+    let sampling_timeout = turn_context.config.model_provider.sampling_timeout();
+    let sampling_deadline =
+        sampling_timeout.map(|timeout| (tokio::time::Instant::now() + timeout, timeout));
     let mut in_flight: FuturesOrdered<BoxFuture<'static, CodexResult<ResponseInputItem>>> =
         FuturesOrdered::new();
     let mut needs_follow_up = false;
@@ -2273,34 +2251,49 @@ async fn try_run_sampling_request(
             codex.usage.total_tokens = field::Empty,
         );
 
-        let event = match tokio::time::timeout(
-            stream_idle_timeout,
-            stream
-                .next()
-                .instrument(trace_span!(parent: &handle_responses, "receiving"))
-                .or_cancel(&cancellation_token),
-        )
-        .await
-        {
-            Ok(Ok(event)) => event,
-            Ok(Err(codex_async_utils::CancelErr::Cancelled)) => {
-                break Err(CodexErr::TurnAborted);
-            }
-            Err(_) => {
-                break Err(CodexErr::Stream(format!(
-                    "idle timeout waiting for response event after {stream_idle_timeout:?}"
-                )));
+        let receive_event = async {
+            let event = match tokio::time::timeout(
+                stream_idle_timeout,
+                stream
+                    .next()
+                    .instrument(trace_span!(parent: &handle_responses, "receiving"))
+                    .or_cancel(&cancellation_token),
+            )
+            .await
+            {
+                Ok(Ok(event)) => event,
+                Ok(Err(codex_async_utils::CancelErr::Cancelled)) => {
+                    return Err(CodexErr::TurnAborted);
+                }
+                Err(_) => {
+                    return Err(CodexErr::Stream(format!(
+                        "idle timeout waiting for response event after {stream_idle_timeout:?}"
+                    )));
+                }
+            };
+
+            match event {
+                Some(Ok(event)) => Ok(event),
+                Some(Err(err)) => Err(err),
+                None => Err(CodexErr::Stream(
+                    "stream closed before response.completed".into(),
+                )),
             }
         };
-
-        let event = match event {
-            Some(Ok(event)) => event,
-            Some(Err(err)) => break Err(err),
-            None => {
-                break Err(CodexErr::Stream(
-                    "stream closed before response.completed".into(),
-                ));
+        let event = match sampling_deadline {
+            Some((deadline, timeout)) => {
+                match tokio::time::timeout_at(deadline, receive_event).await {
+                    Ok(result) => result,
+                    Err(_) => Err(CodexErr::Stream(format!(
+                        "sampling deadline exceeded after {timeout:?}"
+                    ))),
+                }
             }
+            None => receive_event.await,
+        };
+        let event = match event {
+            Ok(event) => event,
+            Err(err) => break Err(err),
         };
 
         sess.services
