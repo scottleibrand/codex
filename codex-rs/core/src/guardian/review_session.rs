@@ -118,6 +118,7 @@ pub(crate) struct GuardianReviewSessionParams {
     pub(crate) personality: Option<Personality>,
     pub(crate) external_cancel: Option<CancellationToken>,
     pub(crate) deadline: tokio::time::Instant,
+    pub(crate) fresh_minimal: bool,
 }
 
 #[derive(Default)]
@@ -303,6 +304,19 @@ pub(super) async fn parent_history_supports_fresh_guardian_retry(session: &Sessi
         )
     });
     !has_compaction || encrypted_parent_compaction(history.raw_items()).is_some()
+}
+
+pub(super) fn guardian_error_is_context_overflow(
+    error_info: Option<&CodexErrorInfo>,
+    message: &str,
+) -> bool {
+    if matches!(error_info, Some(CodexErrorInfo::ContextWindowExceeded)) {
+        return true;
+    }
+
+    let message = message.to_ascii_lowercase();
+    message.contains("context_length_exceeded")
+        || (message.contains("prompt tokens") && message.contains("exceed model maximum"))
 }
 
 pub(crate) fn prompt_cache_key_override_for_review_session(
@@ -494,6 +508,13 @@ impl GuardianReviewSessionManager {
         self.invalidate_for_node_repl_evidence().await;
     }
 
+    pub(super) async fn discard_reusable_trunk(&self) {
+        if let Some(review_session) = self.state.lock().await.trunk.take() {
+            review_session.cancel_token.cancel();
+            review_session.shutdown_in_background();
+        }
+    }
+
     pub(crate) async fn invalidate_for_node_repl_evidence(&self) {
         let (review_session, ephemeral_reviews) = {
             let mut state = self.state.lock().await;
@@ -522,12 +543,6 @@ impl GuardianReviewSessionManager {
     ) -> (GuardianReviewSessionOutcome, GuardianReviewAnalyticsResult) {
         let deadline = params.deadline;
         let parent_history = params.parent_session.clone_history().await;
-        let parent_compaction = params
-            .spawn_config
-            .features
-            .enabled(Feature::GuardianReuseParentCompaction)
-            .then(|| encrypted_parent_compaction(parent_history.raw_items()))
-            .flatten();
         let mut next_reuse_key = GuardianReviewSessionReuseKey::from_spawn_config(
             &params.spawn_config,
             params.parent_session.user_instructions().await,
@@ -541,6 +556,23 @@ impl GuardianReviewSessionManager {
                 .model_info
                 .node_repl_auto_review_required,
         );
+        if params.fresh_minimal {
+            return Box::pin(self.run_ephemeral_review(
+                params,
+                next_reuse_key,
+                deadline,
+                /*parent_compaction*/ None,
+                /*fork_snapshot*/ None,
+            ))
+            .await;
+        }
+
+        let parent_compaction = params
+            .spawn_config
+            .features
+            .enabled(Feature::GuardianReuseParentCompaction)
+            .then(|| encrypted_parent_compaction(parent_history.raw_items()))
+            .flatten();
         let mut spawned_trunk = false;
         let trunk_candidate = match run_before_review_deadline(
             deadline,
@@ -1024,7 +1056,11 @@ async fn run_review_on_session(
             )
             .await?;
 
-            if prompt_items
+            if params.fresh_minimal {
+                prompt_items
+                    .items
+                    .retain(|item| !matches!(item, UserInput::Image { .. }));
+            } else if prompt_items
                 .items
                 .iter()
                 .any(|item| matches!(item, UserInput::Image { .. }))
@@ -1328,9 +1364,9 @@ async fn wait_for_guardian_review(
                             if turn_complete.last_agent_message.is_none()
                                 && let Some(error) = last_error
                             {
-                                let keep_review_session = !matches!(
-                                    error.codex_error_info,
-                                    Some(CodexErrorInfo::ContextWindowExceeded)
+                                let keep_review_session = !guardian_error_is_context_overflow(
+                                    error.codex_error_info.as_ref(),
+                                    &error.message,
                                 );
                                 return (
                                     GuardianReviewSessionOutcome::SessionFailed {
@@ -1660,6 +1696,7 @@ mod tests {
             personality,
             external_cancel: None,
             deadline: tokio::time::Instant::now() + Duration::from_secs(30),
+            fresh_minimal: false,
         }
     }
 
@@ -2394,6 +2431,44 @@ mod tests {
         assert_eq!(error.to_string(), "temporary failure");
         assert_eq!(error_info, Some(CodexErrorInfo::ServerOverloaded));
         assert!(keep_review_session);
+        assert!(capture_token_usage);
+    }
+
+    #[tokio::test]
+    async fn wait_for_guardian_review_discards_other_classified_context_overflow() {
+        let (review_session, tx_event, _rx_sub) = test_review_session().await;
+        let overflow_message = "Error running remote compact task: prompt tokens (1050861) exceed model maximum (1050000)";
+        tx_event
+            .send(Event {
+                id: "current-turn".to_string(),
+                msg: EventMsg::Error(ErrorEvent {
+                    message: overflow_message.to_string(),
+                    codex_error_info: Some(CodexErrorInfo::Other),
+                }),
+            })
+            .await
+            .expect("queue guardian error");
+        tx_event
+            .send(turn_complete_event("current-turn", None, Some(42)))
+            .await
+            .expect("queue current turn completion");
+
+        let mut analytics_result = GuardianReviewAnalyticsResult::without_session();
+        let (outcome, keep_review_session, capture_token_usage) = wait_for_guardian_review(
+            &review_session,
+            "current-turn",
+            tokio::time::Instant::now() + Duration::from_secs(1),
+            /*external_cancel*/ None,
+            &mut analytics_result,
+        )
+        .await;
+
+        let GuardianReviewSessionOutcome::SessionFailed { error, error_info } = outcome else {
+            panic!("expected structured session failure");
+        };
+        assert_eq!(error.to_string(), overflow_message);
+        assert_eq!(error_info, Some(CodexErrorInfo::Other));
+        assert!(!keep_review_session);
         assert!(capture_token_usage);
     }
 
