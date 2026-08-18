@@ -53,6 +53,7 @@ use super::prompt::parse_guardian_assessment;
 use super::review_session::GuardianReviewSessionOutcome;
 use super::review_session::GuardianReviewSessionParams;
 use super::review_session::build_guardian_review_session_config;
+use super::review_session::guardian_error_is_context_overflow;
 use super::review_session::parent_history_supports_fresh_guardian_retry;
 
 const GUARDIAN_REJECTION_INSTRUCTIONS: &str = concat!(
@@ -989,6 +990,12 @@ pub(super) async fn guardian_review_session_config(
 /// context. It may still reuse the parent's managed-network allowlist for
 /// read-only checks, but it intentionally runs without inherited exec-policy
 /// rules.
+#[derive(Clone, Copy)]
+struct GuardianReviewAttempt {
+    deadline: Instant,
+    fresh_minimal: bool,
+}
+
 async fn run_guardian_review_session_before_deadline(
     session: Arc<Session>,
     context: GuardianReviewContext,
@@ -996,7 +1003,7 @@ async fn run_guardian_review_session_before_deadline(
     reasons: ApprovalRequestReasons,
     schema: serde_json::Value,
     external_cancel: Option<CancellationToken>,
-    deadline: Instant,
+    attempt: GuardianReviewAttempt,
 ) -> (GuardianReviewOutcome, GuardianReviewAnalyticsResult) {
     let turn = context.turn();
     let session_config = match guardian_review_session_config(session.as_ref(), turn.as_ref()).await
@@ -1028,7 +1035,8 @@ async fn run_guardian_review_session_before_deadline(
                 reasoning_summary: turn.reasoning_summary,
                 personality: turn.personality,
                 external_cancel,
-                deadline,
+                deadline: attempt.deadline,
+                fresh_minimal: attempt.fresh_minimal,
             }),
     )
     .await;
@@ -1097,7 +1105,9 @@ pub(super) async fn run_guardian_review_session_with_retry(
     assert!(max_attempts > 0, "guardian review must run at least once");
     let deadline = Instant::now() + GUARDIAN_REVIEW_TIMEOUT;
     let mut attempt_count = 1;
+    let mut next_attempt_fresh_minimal = false;
     loop {
+        let attempt_was_fresh_minimal = next_attempt_fresh_minimal;
         let (outcome, mut analytics_result) = run_guardian_review_session_before_deadline(
             Arc::clone(&session),
             context.clone(),
@@ -1105,17 +1115,28 @@ pub(super) async fn run_guardian_review_session_with_retry(
             reasons.clone(),
             schema.clone(),
             external_cancel.clone(),
-            deadline,
+            GuardianReviewAttempt {
+                deadline,
+                fresh_minimal: attempt_was_fresh_minimal,
+            },
         )
         .await;
         analytics_result.attempt_count = attempt_count;
+        if attempt_was_fresh_minimal {
+            return (outcome, analytics_result);
+        }
         if attempt_count >= max_attempts || !should_retry_guardian_review(&outcome) {
             return (outcome, analytics_result);
         }
-        if guardian_review_requires_fresh_trunk(&outcome)
-            && !parent_history_supports_fresh_guardian_retry(session.as_ref()).await
-        {
-            return (outcome, analytics_result);
+        if guardian_review_requires_fresh_trunk(&outcome) {
+            if !parent_history_supports_fresh_guardian_retry(session.as_ref()).await {
+                return (outcome, analytics_result);
+            }
+            session
+                .guardian_review_session
+                .discard_reusable_trunk()
+                .await;
+            next_attempt_fresh_minimal = true;
         }
         if let Some(error) =
             wait_before_guardian_retry(attempt_count, deadline, external_cancel.as_ref()).await
@@ -1148,32 +1169,32 @@ async fn wait_before_guardian_retry(
 }
 
 fn guardian_review_requires_fresh_trunk(outcome: &GuardianReviewOutcome) -> bool {
-    matches!(
-        outcome,
+    match outcome {
         GuardianReviewOutcome::Error(GuardianReviewError::Session {
-            error_info: Some(CodexErrorInfo::ContextWindowExceeded),
-            ..
-        })
-    )
+            message,
+            error_info,
+        }) => guardian_error_is_context_overflow(error_info.as_ref(), message),
+        _ => false,
+    }
 }
 
 fn should_retry_guardian_review(outcome: &GuardianReviewOutcome) -> bool {
-    matches!(
-        outcome,
-        GuardianReviewOutcome::Error(
-            GuardianReviewError::Session {
-                error_info: Some(
-                    CodexErrorInfo::ServerOverloaded
-                        | CodexErrorInfo::ContextWindowExceeded
-                        | CodexErrorInfo::HttpConnectionFailed { .. }
-                        | CodexErrorInfo::ResponseStreamConnectionFailed { .. }
-                        | CodexErrorInfo::InternalServerError
-                        | CodexErrorInfo::ResponseStreamDisconnected { .. }
-                ),
-                ..
-            } | GuardianReviewError::Parse { .. }
+    guardian_review_requires_fresh_trunk(outcome)
+        || matches!(
+            outcome,
+            GuardianReviewOutcome::Error(
+                GuardianReviewError::Session {
+                    error_info: Some(
+                        CodexErrorInfo::ServerOverloaded
+                            | CodexErrorInfo::HttpConnectionFailed { .. }
+                            | CodexErrorInfo::ResponseStreamConnectionFailed { .. }
+                            | CodexErrorInfo::InternalServerError
+                            | CodexErrorInfo::ResponseStreamDisconnected { .. }
+                    ),
+                    ..
+                } | GuardianReviewError::Parse { .. }
+            )
         )
-    )
 }
 
 #[cfg(test)]
@@ -1292,6 +1313,24 @@ mod review_tests {
             })
             .collect::<Vec<_>>();
         outcomes.extend([
+            (
+                GuardianReviewOutcome::Error(GuardianReviewError::session_with_error_info(
+                    anyhow::anyhow!(
+                        "prompt tokens (1051368) exceed model maximum (1050000) for Luna"
+                    ),
+                    CodexErrorInfo::Other,
+                )),
+                true,
+            ),
+            (
+                GuardianReviewOutcome::Error(GuardianReviewError::session_with_error_info(
+                    anyhow::anyhow!(
+                        "Error running remote compact task: prompt tokens (1050861) exceed model maximum (1050000)"
+                    ),
+                    CodexErrorInfo::Other,
+                )),
+                true,
+            ),
             (GuardianReviewOutcome::Completed(assessment), false),
             (
                 GuardianReviewOutcome::Error(GuardianReviewError::prompt_build(anyhow::anyhow!(
@@ -1328,6 +1367,45 @@ mod review_tests {
 
         for (outcome, expected) in outcomes {
             assert_eq!(should_retry_guardian_review(&outcome), expected);
+        }
+    }
+
+    #[test]
+    fn guardian_context_overflow_detection_is_narrow() {
+        let cases = [
+            (
+                Some(CodexErrorInfo::ContextWindowExceeded),
+                "provider omitted a useful message",
+                true,
+            ),
+            (
+                Some(CodexErrorInfo::Other),
+                "prompt tokens (1051368) exceed model maximum (1050000) for Luna",
+                true,
+            ),
+            (
+                Some(CodexErrorInfo::Other),
+                "Error running remote compact task: prompt tokens (1050861) exceed model maximum (1050000)",
+                true,
+            ),
+            (Some(CodexErrorInfo::Other), "context_length_exceeded", true),
+            (
+                Some(CodexErrorInfo::Other),
+                "reviewer service temporarily unavailable",
+                false,
+            ),
+            (
+                None,
+                "guardian review completed without an assessment",
+                false,
+            ),
+        ];
+
+        for (error_info, message, expected) in cases {
+            assert_eq!(
+                guardian_error_is_context_overflow(error_info.as_ref(), message),
+                expected
+            );
         }
     }
 
