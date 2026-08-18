@@ -138,8 +138,10 @@ pub struct ModelProviderInfo {
     /// Maximum time (in milliseconds) to establish a streaming response, including DNS, TCP/TLS,
     /// and response headers.
     pub stream_setup_timeout_ms: Option<u64>,
-    /// Maximum time (in milliseconds) for one sampling cycle, including stream retries and retry
-    /// backoff. Amazon Bedrock defaults to five minutes; other providers have no default deadline.
+    /// Maximum time (in milliseconds) to receive one sampling response after its stream is
+    /// established. Tool execution and approval waits are excluded. A timeout is retried using the
+    /// provider's streaming retry policy and exponential backoff. Amazon Bedrock defaults to five
+    /// minutes per response; other providers have no default deadline.
     pub sampling_timeout_ms: Option<u64>,
     /// Maximum time (in milliseconds) to wait for a websocket connection attempt before treating
     /// it as failed.
