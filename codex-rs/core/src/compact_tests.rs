@@ -416,6 +416,47 @@ async fn process_compacted_history_reinjects_full_initial_context() {
 }
 
 #[tokio::test]
+async fn process_compacted_history_strips_retained_input_images() {
+    let compacted_history = vec![ResponseItem::Message {
+        id: Some(ResponseItemId::with_suffix("msg", "image")),
+        role: "user".to_string(),
+        content: vec![
+            ContentItem::InputText {
+                text: "screenshot context".to_string(),
+            },
+            ContentItem::InputImage {
+                image_url: "data:image/png;base64,stale".to_string(),
+                detail: Some(DEFAULT_IMAGE_DETAIL),
+            },
+        ],
+        phase: None,
+        internal_chat_message_metadata_passthrough: None,
+    }];
+
+    let (refreshed, mut expected) = process_compacted_history_with_test_session(
+        compacted_history,
+        /*previous_turn_settings*/ None,
+    )
+    .await;
+    expected.push(ResponseItem::Message {
+        id: Some(ResponseItemId::with_suffix("msg", "image")),
+        role: "user".to_string(),
+        content: vec![
+            ContentItem::InputText {
+                text: "screenshot context".to_string(),
+            },
+            ContentItem::InputText {
+                text: "[Image omitted after compaction]".to_string(),
+            },
+        ],
+        phase: None,
+        internal_chat_message_metadata_passthrough: None,
+    });
+
+    assert_eq!(refreshed, expected);
+}
+
+#[tokio::test]
 async fn process_compacted_history_drops_non_user_content_messages() {
     let compacted_history = vec![
         ResponseItem::Message {
