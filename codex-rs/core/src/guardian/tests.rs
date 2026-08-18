@@ -2987,7 +2987,7 @@ async fn guardian_context_overflow_discards_reused_trunk_before_retry() -> anyho
     assert_eq!(metadata.attempt_count, 2);
     assert!(matches!(
         metadata.guardian_session_kind,
-        Some(codex_analytics::GuardianReviewSessionKind::TrunkNew)
+        Some(codex_analytics::GuardianReviewSessionKind::EphemeralForked)
     ));
 
     let requests = request_log.requests();
@@ -3007,6 +3007,110 @@ async fn guardian_context_overflow_discards_reused_trunk_before_retry() -> anyho
     assert!(
         requests[2].body_contains_text(BUNDLED_GUARDIAN_POLICY),
         "the fresh retry must retain the Guardian policy"
+    );
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn guardian_context_overflow_retries_fresh_exactly_once() -> anyhow::Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let server = start_mock_server().await;
+    let seed_approval = serde_json::json!({
+        "risk_level": "low",
+        "user_authorization": "high",
+        "outcome": "allow",
+        "rationale": "seed guardian trunk",
+    })
+    .to_string();
+    let unused_approval = serde_json::json!({
+        "risk_level": "low",
+        "user_authorization": "high",
+        "outcome": "allow",
+        "rationale": "must not consume a second fresh retry",
+    })
+    .to_string();
+    let request_log = mount_sse_sequence(
+        &server,
+        vec![
+            sse(vec![
+                ev_response_created("resp-seed-single-retry"),
+                ev_assistant_message("msg-seed-single-retry", &seed_approval),
+                ev_completed("resp-seed-single-retry"),
+            ]),
+            sse_failed(
+                "resp-overflow-reused-trunk",
+                "context_length_exceeded",
+                "prompt tokens (1051368) exceed model maximum (1050000)",
+            ),
+            sse_failed(
+                "resp-overflow-fresh-trunk",
+                "context_length_exceeded",
+                "prompt tokens (1050861) exceed model maximum (1050000)",
+            ),
+            sse(vec![
+                ev_response_created("resp-unused-second-retry"),
+                ev_assistant_message("msg-unused-second-retry", &unused_approval),
+                ev_completed("resp-unused-second-retry"),
+            ]),
+        ],
+    )
+    .await;
+    let (session, turn) = guardian_test_session_and_turn(&server).await;
+    seed_guardian_parent_history(&session, &turn).await;
+
+    let (seed_outcome, _) = run_guardian_review_session_for_test(
+        Arc::clone(&session),
+        Arc::clone(&turn),
+        guardian_shell_request("shell-seed-single-retry"),
+        ApprovalRequestReasons::default(),
+        guardian_output_schema(),
+        /*external_cancel*/ None,
+        /*max_attempts*/ 1,
+    )
+    .await;
+    assert!(matches!(
+        seed_outcome,
+        GuardianReviewOutcome::Completed(GuardianAssessment {
+            outcome: GuardianAssessmentOutcome::Allow,
+            ..
+        })
+    ));
+
+    let request_id = "shell-overflow-single-fresh-retry";
+    let (outcome, metadata) = run_guardian_review_session_for_test(
+        Arc::clone(&session),
+        Arc::clone(&turn),
+        guardian_shell_request(request_id),
+        ApprovalRequestReasons {
+            approval: Some("The user authorized this exact process inspection.".to_string()),
+            retry: None,
+        },
+        guardian_output_schema(),
+        /*external_cancel*/ None,
+        /*max_attempts*/ 3,
+    )
+    .await;
+
+    assert!(matches!(
+        outcome,
+        GuardianReviewOutcome::Error(GuardianReviewError::Session {
+            error_info: Some(CodexErrorInfo::ContextWindowExceeded),
+            ..
+        })
+    ));
+    assert_eq!(metadata.attempt_count, 2);
+    let requests = request_log.requests();
+    assert_eq!(
+        requests.len(),
+        3,
+        "Guardian must attempt only one fresh review after overflow"
+    );
+    assert!(requests[1].body_contains_text(request_id));
+    assert!(requests[2].body_contains_text(request_id));
+    assert!(
+        !requests[2].body_contains_text("seed guardian trunk"),
+        "the fresh attempt must not inherit the poisoned reviewer history"
     );
     Ok(())
 }

@@ -1375,6 +1375,9 @@ async fn run_sampling_request(
         Arc::clone(&turn_diff_tracker),
     );
     let max_retries = turn_context.provider.info().stream_max_retries();
+    let sampling_timeout = turn_context.provider.info().sampling_timeout();
+    let sampling_deadline =
+        sampling_timeout.map(|timeout| (tokio::time::Instant::now() + timeout, timeout));
     let mut retry_state = ResponsesStreamRetryState::default();
     let mut initial_input = Some(input);
     let mut original_input = None;
@@ -1399,7 +1402,7 @@ async fn run_sampling_request(
             step_context.as_ref(),
             base_instructions.clone(),
         );
-        let err = match try_run_sampling_request(
+        let sampling_attempt = try_run_sampling_request(
             tool_runtime.clone(),
             Arc::clone(&sess),
             Arc::clone(&step_context),
@@ -1409,9 +1412,21 @@ async fn run_sampling_request(
             Arc::clone(&turn_diff_tracker),
             &prompt,
             cancellation_token.child_token(),
-        )
-        .await
-        {
+        );
+        let sampling_result = match sampling_deadline {
+            Some((deadline, timeout)) => {
+                match tokio::time::timeout_at(deadline, sampling_attempt).await {
+                    Ok(result) => result,
+                    Err(_) => {
+                        return Err(CodexErr::Stream(format!(
+                            "sampling deadline exceeded after {timeout:?}"
+                        )));
+                    }
+                }
+            }
+            None => sampling_attempt.await,
+        };
+        let err = match sampling_result {
             Ok(output) => {
                 return Ok((output, original_input.unwrap_or(prompt.input)));
             }
@@ -1439,7 +1454,7 @@ async fn run_sampling_request(
             return Err(err);
         }
 
-        handle_retryable_response_stream_error(
+        let retry = handle_retryable_response_stream_error(
             &mut retry_state,
             max_retries,
             err,
@@ -1447,8 +1462,18 @@ async fn run_sampling_request(
             &sess,
             &turn_context,
             ResponsesStreamRequest::Sampling,
-        )
-        .await?;
+        );
+        match sampling_deadline {
+            Some((deadline, timeout)) => match tokio::time::timeout_at(deadline, retry).await {
+                Ok(result) => result?,
+                Err(_) => {
+                    return Err(CodexErr::Stream(format!(
+                        "sampling deadline exceeded after {timeout:?}"
+                    )));
+                }
+            },
+            None => retry.await?,
+        }
         turn_context.turn_timing_state.record_sampling_retry();
     }
 }
@@ -2221,9 +2246,9 @@ async fn try_run_sampling_request(
         .features
         .enabled(Feature::ConcurrentReasoningSummaries)
         && turn_context.provider.info().is_openai();
-    let stream_idle_timeout = turn_context.provider.info().stream_idle_timeout();
+    let stream_setup_timeout = turn_context.provider.info().stream_setup_timeout();
     let mut stream = match tokio::time::timeout(
-        stream_idle_timeout,
+        stream_setup_timeout,
         client_session
             .stream(
                 prompt,
@@ -2246,10 +2271,11 @@ async fn try_run_sampling_request(
         }
         Err(_) => {
             return Err(CodexErr::Stream(format!(
-                "idle timeout waiting for response stream after {stream_idle_timeout:?}"
+                "timeout establishing response stream after {stream_setup_timeout:?}"
             )));
         }
     };
+    let stream_idle_timeout = turn_context.config.model_provider.stream_idle_timeout();
     let mut in_flight: FuturesOrdered<BoxFuture<'static, CodexResult<ResponseInputItem>>> =
         FuturesOrdered::new();
     let mut needs_follow_up = false;
