@@ -1858,7 +1858,7 @@ async fn multi_agent_v2_send_message_rejects_interrupt_parameter() {
     let Err(err) = SendMessageHandlerV2.handle(invocation).await else {
         panic!("send_message interrupt parameter should be rejected");
     };
-    let FunctionCallError::RespondToModel(message) = err else {
+    let FunctionCallError::MalformedArguments(message) = err else {
         panic!("expected model-facing parse error");
     };
     assert!(message.starts_with(
