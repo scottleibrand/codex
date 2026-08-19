@@ -13,6 +13,8 @@ use crate::compact::compaction_status_from_result;
 use crate::compact::insert_initial_context_before_last_real_user_or_summary;
 use crate::compact_model_fallback::record_model_fallback;
 use crate::compact_model_fallback::should_retry_with_current_model;
+use crate::compact_remote::estimate_compacted_history_tokens;
+use crate::compact_remote::insufficient_post_compaction_headroom;
 use crate::compact_remote::should_keep_compacted_history_item;
 use crate::compact_remote_history::HistoryItemGroup;
 use crate::compact_remote_history::history_item_groups;
@@ -66,7 +68,6 @@ use attempt::run_remote_compact_v2_attempt;
 pub(crate) const RETAINED_MESSAGE_TOKEN_BUDGET: usize = 64_000;
 const MAX_RETAINED_AGENT_MESSAGE_TOKENS: i64 = 10_000;
 const OMITTED_IMAGE_PLACEHOLDER: &str = "[Image omitted after compaction]";
-const MAX_REQUIRED_POST_COMPACTION_HEADROOM_TOKENS: i64 = 64_000;
 // Compact attempts can run much longer than normal turns, so keep the per-transport
 // retry budget smaller than the general Responses stream retry budget.
 const MAX_REMOTE_COMPACTION_V2_STREAM_RETRIES: u64 = 2;
@@ -310,8 +311,10 @@ async fn run_remote_compact_task_inner_impl(
     let new_history =
         insert_initial_context_before_last_real_user_or_summary(compacted_history, initial_context);
     let base_instructions = sess.get_base_instructions().await;
-    let estimated_tokens =
-        estimate_compacted_history_tokens(&new_history, base_instructions.text.as_str());
+    let estimated_tokens = estimate_compacted_history_tokens(
+        new_history.iter().map(|envelope| &envelope.item),
+        base_instructions.text.as_str(),
+    );
     if let Some((context_window, required_headroom)) = insufficient_post_compaction_headroom(
         estimated_tokens,
         compaction_turn_context.model_context_window(),
@@ -379,28 +382,6 @@ async fn run_remote_compact_task_inner_impl(
     sess.emit_turn_item_completed(compaction_turn_context, compaction_item)
         .await;
     Ok(())
-}
-
-fn estimate_compacted_history_tokens(
-    history: &[ResponseItemEnvelope],
-    base_instructions: &str,
-) -> i64 {
-    let base_tokens = i64::try_from(approx_token_count(base_instructions)).unwrap_or(i64::MAX);
-    history
-        .iter()
-        .map(|envelope| estimate_item_token_count(&envelope.item))
-        .fold(base_tokens, i64::saturating_add)
-}
-
-fn insufficient_post_compaction_headroom(
-    estimated_tokens: i64,
-    context_window: Option<i64>,
-) -> Option<(i64, i64)> {
-    let context_window = context_window?;
-    let required_headroom =
-        (context_window / 4).clamp(1, MAX_REQUIRED_POST_COMPACTION_HEADROOM_TOKENS);
-    (estimated_tokens > context_window.saturating_sub(required_headroom))
-        .then_some((context_window, required_headroom))
 }
 
 struct RemoteCompactionV2Output {

@@ -5286,7 +5286,7 @@ async fn oversized_remote_v2_compaction_falls_back_to_fresh_context() -> Result<
     skip_if_no_network!(Ok(()));
 
     let server = responses::start_mock_server().await;
-    let oversized_compaction = "x".repeat(20_000);
+    let oversized_compaction = "x".repeat(80_000);
     let response_mock = responses::mount_sse_sequence(
         &server,
         vec![
@@ -5305,7 +5305,7 @@ async fn oversized_remote_v2_compaction_falls_back_to_fresh_context() -> Result<
     let mut builder = test_codex()
         .with_auth(CodexAuth::create_dummy_chatgpt_auth_for_testing())
         .with_config(|config| {
-            config.model_context_window = Some(1_000);
+            config.model_context_window = Some(20_000);
             let _ = config.features.enable(Feature::RemoteCompactionV2);
         });
     let test = builder.build(&server).await?;
@@ -5333,6 +5333,83 @@ async fn oversized_remote_v2_compaction_falls_back_to_fresh_context() -> Result<
     );
     assert!(
         requests[2]
+            .message_input_texts("user")
+            .iter()
+            .any(|text| text.contains("after oversized compaction")),
+        "fresh context should accept the next user turn"
+    );
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn oversized_remote_v1_history_falls_back_to_fresh_context() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let server = start_mock_server().await;
+    let retained_text = "retained provider history ".repeat(50);
+    let mut compacted_history = (0..100)
+        .map(|_| codex_protocol::models::ResponseItem::Message {
+            id: None,
+            role: "assistant".to_string(),
+            content: vec![codex_protocol::models::ContentItem::OutputText {
+                text: retained_text.clone(),
+            }],
+            phase: None,
+            internal_chat_message_metadata_passthrough: None,
+        })
+        .collect::<Vec<_>>();
+    compacted_history.push(codex_protocol::models::ResponseItem::Compaction {
+        id: None,
+        encrypted_content: "small encrypted summary".to_string(),
+        internal_chat_message_metadata_passthrough: None,
+    });
+    let compact_mock =
+        mount_compact_json_once(&server, json!({ "output": compacted_history })).await;
+    let response_mock = mount_sse_sequence(
+        &server,
+        vec![
+            sse(vec![
+                responses::ev_response_created("initial-response"),
+                ev_completed("initial-response"),
+            ]),
+            sse(vec![
+                responses::ev_response_created("post-compact-response"),
+                ev_completed("post-compact-response"),
+            ]),
+        ],
+    )
+    .await;
+    let mut builder = test_codex().with_config(|config| {
+        config.model_context_window = Some(20_000);
+        let _ = config.features.disable(Feature::RemoteCompactionV2);
+    });
+    let test = builder.build(&server).await?;
+
+    test.submit_turn("before oversized compaction").await?;
+    test.codex.submit(Op::Compact).await?;
+    wait_for_event(&test.codex, |event| {
+        matches!(event, EventMsg::TurnComplete(_))
+    })
+    .await;
+    test.submit_turn("after oversized compaction").await?;
+
+    assert_eq!(
+        compact_mock.requests().len(),
+        1,
+        "oversized V1 history should fall back once without another compact request"
+    );
+    let requests = response_mock.requests();
+    assert_eq!(requests.len(), 2);
+    assert!(
+        requests[1]
+            .message_input_texts("assistant")
+            .iter()
+            .all(|text| !text.contains("retained provider history")),
+        "post-compaction request must not install oversized provider history"
+    );
+    assert!(
+        requests[1]
             .message_input_texts("user")
             .iter()
             .any(|text| text.contains("after oversized compaction")),
