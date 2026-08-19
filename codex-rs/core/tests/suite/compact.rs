@@ -392,6 +392,19 @@ fn remote_v2_compaction_response() -> String {
     ])
 }
 
+fn remote_v2_compaction_response_with_content(encrypted_content: &str) -> String {
+    responses::sse(vec![
+        json!({
+            "type": "response.output_item.done",
+            "item": {
+                "type": "compaction",
+                "encrypted_content": encrypted_content,
+            }
+        }),
+        responses::ev_completed("remote-v2-compact-response"),
+    ])
+}
+
 fn local_compaction_provider(server: &wiremock::MockServer) -> ModelProviderInfo {
     let mut provider = built_in_model_providers(/*openai_base_url*/ None)["openai"].clone();
     provider.name = "OpenAI-compatible test provider".to_string();
@@ -5263,6 +5276,67 @@ async fn remote_v2_compaction_keeps_creation_time_instructions_after_same_path_m
         resumed.codex.instruction_sources().await,
         vec![PathUri::from_abs_path(&source)],
         "cold-resumed thread reports the same rewritten source path"
+    );
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn oversized_remote_v2_compaction_falls_back_to_fresh_context() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let server = responses::start_mock_server().await;
+    let oversized_compaction = "x".repeat(20_000);
+    let response_mock = responses::mount_sse_sequence(
+        &server,
+        vec![
+            responses::sse(vec![
+                responses::ev_response_created("initial-response"),
+                responses::ev_completed("initial-response"),
+            ]),
+            remote_v2_compaction_response_with_content(&oversized_compaction),
+            responses::sse(vec![
+                responses::ev_response_created("post-compact-response"),
+                responses::ev_completed("post-compact-response"),
+            ]),
+        ],
+    )
+    .await;
+    let mut builder = test_codex()
+        .with_auth(CodexAuth::create_dummy_chatgpt_auth_for_testing())
+        .with_config(|config| {
+            config.model_context_window = Some(1_000);
+            let _ = config.features.enable(Feature::RemoteCompactionV2);
+        });
+    let test = builder.build(&server).await?;
+
+    test.submit_turn("before oversized compaction").await?;
+    test.codex.submit(Op::Compact).await?;
+    wait_for_event(&test.codex, |event| {
+        matches!(event, EventMsg::TurnComplete(_))
+    })
+    .await;
+    test.submit_turn("after oversized compaction").await?;
+
+    let requests = response_mock.requests();
+    assert_eq!(
+        requests.len(),
+        3,
+        "oversized remote output should fall back once without another compact request"
+    );
+    assert!(
+        requests[2]
+            .input()
+            .iter()
+            .all(|item| item.get("type").and_then(Value::as_str) != Some("compaction")),
+        "post-compaction request must not install the oversized encrypted artifact"
+    );
+    assert!(
+        requests[2]
+            .message_input_texts("user")
+            .iter()
+            .any(|text| text.contains("after oversized compaction")),
+        "fresh context should accept the next user turn"
     );
 
     Ok(())
