@@ -2,6 +2,7 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
+use std::time::SystemTime;
 
 use anyhow::Result;
 use codex_core::config::Config;
@@ -38,6 +39,7 @@ use core_test_support::test_codex::test_codex;
 use pretty_assertions::assert_eq;
 use serde_json::json;
 
+use super::GuardianV2Extension;
 use super::GuardianV2ScoreProgress;
 use super::encrypted_parent_compaction;
 use crate::config::DEFAULT_MODEL_CONTEXT_ITEM_TOKENS;
@@ -55,6 +57,34 @@ impl ConversationHistorySnapshot for TestConversationHistory {
     fn items(&self) -> Box<dyn Iterator<Item = &ResponseItem> + Send + '_> {
         Box::new(self.0.iter())
     }
+}
+
+#[test]
+fn fail_closed_score_preserves_classification_order() {
+    let thread_store = ExtensionData::new("thread-1");
+    let newer_sampled_at = SystemTime::UNIX_EPOCH + Duration::from_secs(1);
+    let newest_sampled_at = newer_sampled_at + Duration::from_secs(1);
+    let newer_score = SecurityRiskScore {
+        scores: BTreeMap::from([("action_risk".to_owned(), 0.25)]),
+        sampled_at: Some(newer_sampled_at.into()),
+    };
+    thread_store.insert(newer_score.clone());
+
+    GuardianV2Extension::record_fail_closed_score(&thread_store, SystemTime::UNIX_EPOCH);
+    assert_eq!(
+        thread_store.get::<SecurityRiskScore>().as_deref(),
+        Some(&newer_score)
+    );
+
+    GuardianV2Extension::record_fail_closed_score(&thread_store, newest_sampled_at);
+    let fail_closed_score = SecurityRiskScore {
+        scores: BTreeMap::from([("action_risk".to_owned(), 1.0)]),
+        sampled_at: Some(newest_sampled_at.into()),
+    };
+    assert_eq!(
+        thread_store.get::<SecurityRiskScore>().as_deref(),
+        Some(&fail_closed_score)
+    );
 }
 
 #[test]
@@ -491,6 +521,31 @@ max_recent_non_user_entries = 8
     score_progress
         .latest_scored_tool_call
         .store(/*val*/ 2, Ordering::Release);
+    assert_eq!(
+        registry
+            .approval_review(&session_store, thread_store, "review action")
+            .await,
+        Some(ReviewDecision::Approved)
+    );
+
+    score_progress
+        .latest_tool_call
+        .store(/*val*/ 5, Ordering::Release);
+    score_progress
+        .latest_failed_tool_call
+        .store(/*val*/ 5, Ordering::Release);
+    score_progress
+        .latest_scored_tool_call
+        .store(/*val*/ 4, Ordering::Release);
+    assert_eq!(
+        registry
+            .approval_review(&session_store, thread_store, "review action")
+            .await,
+        None
+    );
+    score_progress
+        .latest_scored_tool_call
+        .store(/*val*/ 5, Ordering::Release);
     assert_eq!(
         registry
             .approval_review(&session_store, thread_store, "review action")

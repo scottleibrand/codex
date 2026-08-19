@@ -187,6 +187,7 @@ struct GuardianV2Enabled;
 struct GuardianV2ScoreProgress {
     latest_tool_call: AtomicUsize,
     latest_scored_tool_call: AtomicUsize,
+    latest_failed_tool_call: AtomicUsize,
 }
 
 #[derive(Clone)]
@@ -282,15 +283,21 @@ impl ApprovalReviewContributor for GuardianV2Extension {
             thread_store.get::<GuardianV2Enabled>()?;
             let guardian_config = thread_store.get::<GuardianV2Config>()?;
             let score_progress = thread_store.get::<GuardianV2ScoreProgress>()?;
+            let latest_scored_tool_call = score_progress
+                .latest_scored_tool_call
+                .load(Ordering::Acquire);
             let tool_call_lag = score_progress
                 .latest_tool_call
                 .load(Ordering::Acquire)
-                .saturating_sub(
-                    score_progress
-                        .latest_scored_tool_call
-                        .load(Ordering::Acquire),
-                );
+                .saturating_sub(latest_scored_tool_call);
             if tool_call_lag > guardian_config.max_tool_call_lag {
+                return None;
+            }
+            if score_progress
+                .latest_failed_tool_call
+                .load(Ordering::Acquire)
+                > latest_scored_tool_call
+            {
                 return None;
             }
 
@@ -350,13 +357,7 @@ impl ToolLifecycleContributor for GuardianV2Extension {
                 _ => false,
             })
         {
-            let score = SecurityRiskScore {
-                scores: BTreeMap::from([("action_risk".to_owned(), 1.0)]),
-                sampled_at: Some(sampled_at.into()),
-            };
-            input.thread_store.insert_if(score.clone(), |previous| {
-                previous.is_none_or(|previous| previous.sampled_at <= score.sampled_at)
-            });
+            Self::record_fail_closed_score(input.thread_store, sampled_at);
             return Box::pin(std::future::ready(()));
         }
         let event_sink = Arc::clone(&self.event_sink);
@@ -384,6 +385,9 @@ impl ToolLifecycleContributor for GuardianV2Extension {
             let planned_action = match action.render(guardian_config.max_action_tokens) {
                 Ok(planned_action) => planned_action,
                 Err(error) => {
+                    score_progress
+                        .latest_failed_tool_call
+                        .fetch_max(tool_call_index, Ordering::Release);
                     event_sink.emit_warning(ExtensionWarning {
                         thread_id,
                         turn_id: Some(turn_id),
@@ -402,6 +406,7 @@ impl ToolLifecycleContributor for GuardianV2Extension {
                 format!("{planned_action}\n"),
                 ">>> APPROVAL REQUEST END\n".to_owned(),
             ]);
+            let fail_closed_thread_manager = thread_manager.clone();
             let result: Result<(), String> = async {
                 let parsed_thread_id =
                     ThreadId::from_string(&thread_id).map_err(|error| error.to_string())?;
@@ -519,6 +524,16 @@ impl ToolLifecycleContributor for GuardianV2Extension {
             }
             .await;
             if let Err(error) = result {
+                score_progress
+                    .latest_failed_tool_call
+                    .fetch_max(tool_call_index, Ordering::Release);
+                if let (Some(manager), Ok(parsed_thread_id)) = (
+                    fail_closed_thread_manager.upgrade(),
+                    ThreadId::from_string(&thread_id),
+                ) && let Ok(thread) = manager.get_thread(parsed_thread_id).await
+                {
+                    Self::record_fail_closed_score(thread.thread_extension_data(), sampled_at);
+                }
                 event_sink.emit_warning(ExtensionWarning {
                     thread_id,
                     turn_id: Some(turn_id),
@@ -528,6 +543,18 @@ impl ToolLifecycleContributor for GuardianV2Extension {
         });
 
         Box::pin(std::future::ready(()))
+    }
+}
+
+impl GuardianV2Extension {
+    fn record_fail_closed_score(thread_store: &ExtensionData, sampled_at: SystemTime) {
+        let score = SecurityRiskScore {
+            scores: BTreeMap::from([("action_risk".to_owned(), 1.0)]),
+            sampled_at: Some(sampled_at.into()),
+        };
+        thread_store.insert_if(score.clone(), |previous| {
+            previous.is_none_or(|previous| previous.sampled_at <= score.sampled_at)
+        });
     }
 }
 
