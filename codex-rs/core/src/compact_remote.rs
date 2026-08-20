@@ -29,6 +29,7 @@ use codex_analytics::CompactionReason;
 use codex_analytics::CompactionTrigger;
 use codex_history::ResponseItemEnvelope;
 use codex_protocol::error::CodexErr;
+use codex_protocol::error::CodexErrorDetails;
 use codex_protocol::error::Result as CodexResult;
 use codex_protocol::items::ContextCompactionItem;
 use codex_protocol::items::TurnItem;
@@ -51,6 +52,36 @@ use request::run_remote_compact_attempt;
 const CONTEXT_WINDOW_TRUNCATED_OUTPUT_MESSAGE: &str =
     "Output exceeded the available model context and was truncated";
 const MAX_REQUIRED_POST_COMPACTION_HEADROOM_TOKENS: i64 = 64_000;
+
+pub(crate) fn remote_compact_error_is_context_overflow(error: &CodexErr) -> bool {
+    if matches!(error.details(), CodexErrorDetails::ContextWindowExceeded) {
+        return true;
+    }
+
+    let message = error.to_string().to_ascii_lowercase();
+    message.contains("context_length_exceeded")
+        || (message.contains("prompt tokens") && message.contains("exceed model maximum"))
+}
+
+pub(crate) async fn recover_from_remote_compact_context_overflow(
+    sess: &Arc<Session>,
+    step_context: &Arc<StepContext>,
+    turn_context: &TurnContext,
+    compaction_item: TurnItem,
+    error: &CodexErr,
+) -> CodexResult<()> {
+    warn!(
+        turn_id = %turn_context.sub_id,
+        error = %error,
+        "remote compaction request exceeded the model context; starting a fresh context window"
+    );
+    let world_state = Arc::new(sess.build_world_state_for_step(step_context).await?);
+    sess.start_new_context_window(step_context, world_state)
+        .await;
+    sess.emit_turn_item_completed(turn_context, compaction_item)
+        .await;
+    Ok(())
+}
 
 pub(crate) async fn run_inline_remote_auto_compact_task(
     sess: Arc<Session>,
@@ -226,6 +257,16 @@ async fn run_remote_compact_task_inner_impl(
     let (attempt, compaction_turn_context) = match attempt {
         Ok(attempt) => (attempt, turn_context),
         Err(error) => {
+            if remote_compact_error_is_context_overflow(&error) {
+                return recover_from_remote_compact_context_overflow(
+                    sess,
+                    step_context,
+                    turn_context,
+                    compaction_item,
+                    &error,
+                )
+                .await;
+            }
             let Some(fallback_step_context) = fallback_step_context else {
                 return Err(error);
             };

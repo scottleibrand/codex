@@ -4060,8 +4060,6 @@ async fn snapshot_request_shape_remote_pre_turn_compaction_strips_incoming_model
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-// TODO(ccunningham): Update once remote pre-turn compaction context-overflow handling includes
-// incoming user input and emits richer oversized-input messaging.
 async fn snapshot_request_shape_remote_pre_turn_compaction_context_window_exceeded() -> Result<()> {
     skip_if_no_network!(Ok(()));
 
@@ -4088,8 +4086,8 @@ async fn snapshot_request_shape_remote_pre_turn_compaction_context_window_exceed
         harness.server(),
         ResponseTemplate::new(400).set_body_json(serde_json::json!({
             "error": {
-                "code": "context_length_exceeded",
-                "message": "Your input exceeds the context window of this model. Please adjust your input and try again."
+                "code": "validation_error",
+                "message": "prompt tokens (1051095) exceed model maximum (1050000) for openai.gpt-5.6-luna"
             }
         })),
     )
@@ -4097,7 +4095,7 @@ async fn snapshot_request_shape_remote_pre_turn_compaction_context_window_exceed
     let post_compact_turn_mock = responses::mount_sse_once(
         harness.server(),
         responses::sse(vec![
-            responses::ev_assistant_message("m2", "REMOTE_POST_COMPACT_SHOULD_NOT_RUN"),
+            responses::ev_assistant_message("m2", "REMOTE_POST_COMPACT_REPLY"),
             responses::ev_completed_with_tokens("r2", /*total_tokens*/ 80),
         ]),
     )
@@ -4117,8 +4115,10 @@ async fn snapshot_request_shape_remote_pre_turn_compaction_context_window_exceed
             text_elements: Vec::new(),
         }]))
         .await?;
-    let error_message = wait_for_event_match(&codex, |event| match event {
-        EventMsg::Error(err) => Some(err.message.clone()),
+    wait_for_event_match(&codex, |event| match event {
+        EventMsg::AgentMessage(message) => {
+            (message.message == "REMOTE_POST_COMPACT_REPLY").then_some(())
+        }
         _ => None,
     })
     .await;
@@ -4129,29 +4129,25 @@ async fn snapshot_request_shape_remote_pre_turn_compaction_context_window_exceed
     assert_eq!(
         requests.len(),
         1,
-        "expected no post-compaction follow-up turn request after compact failure"
+        "expected only the initial request on the first response mock"
     );
-    assert!(
-        post_compact_turn_mock.requests().is_empty(),
-        "expected turn to stop after compaction failure"
+    assert_eq!(
+        post_compact_turn_mock.requests().len(),
+        1,
+        "expected the turn to continue from a fresh context after compact overflow"
     );
 
     let include_attempt_request = compact_mock.single_request();
     insta::assert_snapshot!(
         "remote_pre_turn_compaction_context_window_exceeded_shapes",
         format_labeled_requests_snapshot(
-            "Remote pre-turn auto-compaction context-window failure: compaction request excludes the incoming user message and the turn errors.",
+            "Remote pre-turn auto-compaction context-window failure: compaction request excludes the incoming user message, then the turn continues from a fresh context.",
             &[(
                 "Remote Compaction Request (Incoming User Excluded)",
                 &include_attempt_request
             ),]
         )
     );
-    assert!(
-        error_message.to_lowercase().contains("context window"),
-        "expected context window failure to surface, got {error_message}"
-    );
-
     Ok(())
 }
 
