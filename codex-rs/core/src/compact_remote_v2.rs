@@ -15,6 +15,8 @@ use crate::compact_model_fallback::record_model_fallback;
 use crate::compact_model_fallback::should_retry_with_current_model;
 use crate::compact_remote::estimate_compacted_history_tokens;
 use crate::compact_remote::insufficient_post_compaction_headroom;
+use crate::compact_remote::recover_from_remote_compact_context_overflow;
+use crate::compact_remote::remote_compact_error_is_context_overflow;
 use crate::compact_remote::replace_input_images_with_compaction_placeholder;
 use crate::compact_remote::replace_input_images_with_compaction_placeholder_in_envelopes;
 use crate::compact_remote::should_keep_compacted_history_item;
@@ -247,6 +249,16 @@ async fn run_remote_compact_task_inner_impl(
     let (attempt, compaction_turn_context) = match attempt {
         Ok(attempt) => (attempt, turn_context),
         Err(error) => {
+            if remote_compact_error_is_context_overflow(&error) {
+                return recover_from_remote_compact_context_overflow(
+                    sess,
+                    step_context,
+                    turn_context,
+                    compaction_item,
+                    &error,
+                )
+                .await;
+            }
             let Some(fallback_step_context) = fallback_step_context else {
                 return Err(error);
             };
