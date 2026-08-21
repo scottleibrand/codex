@@ -230,25 +230,9 @@ pub(crate) fn spawn_exit_watcher(
                 None
             }
         };
-        // Interaction publication is itself bounded. Give it an additional grace interval, then
-        // force the terminal claim so an exited command cannot silently lose its terminal event.
-        let terminal_claimed = match tokio::time::timeout(
-            TERMINAL_EVENT_FINALIZATION_TIMEOUT * 2,
-            process.claim_terminal_event(),
-        )
-        .await
-        {
-            Ok(claimed) => claimed,
-            Err(_) => {
-                tracing::warn!(
-                    call_id,
-                    process_id,
-                    stage = "event_publication",
-                    "timed out waiting for an active interaction event; forcing terminal event"
-                );
-                process.force_claim_terminal_event()
-            }
-        };
+        // The only production interaction publisher has its send bounded, so this wait preserves
+        // event order and still guarantees eventual terminal publication.
+        let terminal_claimed = process.claim_terminal_event().await;
         if !terminal_claimed {
             tracing::debug!(call_id, process_id, "terminal event already claimed");
             return;

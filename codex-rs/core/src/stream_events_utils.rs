@@ -13,6 +13,7 @@ use crate::parse_turn_item;
 use crate::session::session::Session;
 use crate::session::turn_context::TurnContext;
 use crate::tools::parallel::ToolCallRuntime;
+use crate::tools::parallel::repeated_malformed_function_call_error;
 use crate::tools::router::ToolRouter;
 use crate::tools::router::tool_log_payload;
 use codex_memories_read::citations::parse_memory_citation;
@@ -361,7 +362,45 @@ pub(crate) async fn handle_output_item_done(
         }
         // The tool request should be answered directly (or was denied); push that response into the transcript.
         Err(FunctionCallError::MalformedArguments(message)) => {
-            return Err(CodexErr::InvalidRequest(message));
+            if let ResponseItem::FunctionCall {
+                name,
+                namespace,
+                arguments,
+                call_id,
+                ..
+            } = &item
+            {
+                let tool_name =
+                    codex_tools::ToolName::new(namespace.clone(), name).with_default_namespace();
+                if let Some(err) = repeated_malformed_function_call_error(
+                    ctx.sess.as_ref(),
+                    &tool_name,
+                    arguments,
+                    call_id,
+                )
+                .await
+                {
+                    return Err(err);
+                }
+            }
+            let response = ResponseInputItem::FunctionCallOutput {
+                call_id: String::new(),
+                output: FunctionCallOutputPayload {
+                    body: FunctionCallOutputBody::Text(message),
+                    ..Default::default()
+                },
+            };
+            record_completed_response_item(ctx.sess.as_ref(), ctx.turn_context.as_ref(), &item)
+                .await;
+            if let Some(response_item) = response_input_to_response_item(&response) {
+                ctx.sess
+                    .record_conversation_items(
+                        &ctx.turn_context,
+                        std::slice::from_ref(&response_item),
+                    )
+                    .await;
+            }
+            output.needs_follow_up = true;
         }
         Err(FunctionCallError::RespondToModel(message)) => {
             let response = ResponseInputItem::FunctionCallOutput {
