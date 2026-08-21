@@ -275,7 +275,7 @@ async fn exit_watcher_waits_for_late_network_denial_before_classifying_end() -> 
 }
 
 #[tokio::test]
-async fn exit_watcher_bounds_interaction_lock_wait_after_exit() -> anyhow::Result<()> {
+async fn exit_watcher_does_not_depend_on_interaction_lock_after_exit() -> anyhow::Result<()> {
     let StreamingOutputHarness {
         process,
         stdout_tx,

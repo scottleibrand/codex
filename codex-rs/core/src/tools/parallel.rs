@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::sync::Arc;
 use std::sync::OnceLock;
 use std::sync::atomic::AtomicBool;
@@ -32,6 +33,7 @@ use codex_protocol::models::ResponseInputItem;
 use codex_protocol::models::ResponseItem;
 
 const MAX_IDENTICAL_MALFORMED_TOOL_CALLS: usize = 3;
+const MALFORMED_ARGUMENTS_OUTPUT_PREFIX: &str = "Malformed function arguments: ";
 
 struct ToolCallTimingGuard {
     started_at: Instant,
@@ -105,10 +107,7 @@ impl ToolCallRuntime {
                     {
                         Err(err)
                     } else {
-                        Ok(Self::failure_response(
-                            error_call,
-                            FunctionCallError::RespondToModel(message),
-                        ))
+                        Ok(malformed_function_call_output(error_call.call_id, message))
                     }
                 }
                 Err(other) => Ok(Self::failure_response(error_call, other)),
@@ -269,37 +268,66 @@ pub(crate) async fn repeated_malformed_function_call_error(
     })
 }
 
+pub(crate) fn malformed_function_call_output(
+    call_id: String,
+    message: String,
+) -> ResponseInputItem {
+    ResponseInputItem::FunctionCallOutput {
+        call_id,
+        output: codex_protocol::models::FunctionCallOutputPayload {
+            body: codex_protocol::models::FunctionCallOutputBody::Text(format!(
+                "{MALFORMED_ARGUMENTS_OUTPUT_PREFIX}{message}"
+            )),
+            success: Some(false),
+        },
+    }
+}
+
 fn identical_prior_function_call_count_in_items<'a>(
     items: impl DoubleEndedIterator<Item = &'a ResponseItem>,
     tool_name: &codex_tools::ToolName,
     arguments: &str,
     call_id: &str,
 ) -> usize {
-    items
-        .rev()
-        .take_while(|item| {
-            !matches!(
-                item,
-                ResponseItem::Message { role, .. } if role == "user"
-            )
-        })
-        .filter(|item| {
-            matches!(
-                item,
-                ResponseItem::FunctionCall {
-                    call_id: candidate_call_id,
-                    name,
-                    namespace,
-                    arguments: candidate_arguments,
-                    ..
-                } if codex_tools::ToolName::new(namespace.clone(), name)
-                    .with_default_namespace()
+    let mut malformed_call_ids = HashSet::new();
+    let mut count = 0;
+    for item in items.rev().take_while(|item| {
+        !matches!(
+            item,
+            ResponseItem::Message { role, .. } if role == "user"
+        )
+    }) {
+        match item {
+            ResponseItem::FunctionCallOutput {
+                call_id: Some(output_call_id),
+                output,
+                ..
+            } if matches!(
+                &output.body,
+                codex_protocol::models::FunctionCallOutputBody::Text(text)
+                    if text.starts_with(MALFORMED_ARGUMENTS_OUTPUT_PREFIX)
+            ) =>
+            {
+                malformed_call_ids.insert(output_call_id.as_str());
+            }
+            ResponseItem::FunctionCall {
+                call_id: candidate_call_id,
+                name,
+                namespace,
+                arguments: candidate_arguments,
+                ..
+            } if candidate_call_id != call_id
+                && malformed_call_ids.contains(candidate_call_id.as_str())
+                && codex_tools::ToolName::new(namespace.clone(), name).with_default_namespace()
                     == *tool_name
-                    && candidate_arguments == arguments
-                    && candidate_call_id != call_id
-            )
-        })
-        .count()
+                && candidate_arguments == arguments =>
+            {
+                count += 1;
+            }
+            _ => {}
+        }
+    }
+    count
 }
 
 impl ToolCallRuntime {
@@ -480,7 +508,20 @@ mod tests {
             call_id: Some(call_id.to_string()),
             name: None,
             namespace: None,
-            output: FunctionCallOutputPayload::from_text("parse error".to_string()),
+            output: FunctionCallOutputPayload::from_text(format!(
+                "{MALFORMED_ARGUMENTS_OUTPUT_PREFIX}parse error"
+            )),
+            internal_chat_message_metadata_passthrough: None,
+        }
+    }
+
+    fn successful_function_output(call_id: &str) -> ResponseItem {
+        ResponseItem::FunctionCallOutput {
+            id: None,
+            call_id: Some(call_id.to_string()),
+            name: None,
+            namespace: None,
+            output: FunctionCallOutputPayload::from_text("ok".to_string()),
             internal_chat_message_metadata_passthrough: None,
         }
     }
@@ -553,6 +594,17 @@ mod tests {
         ];
 
         assert_eq!(malformed_attempt_count(&items, &wait_call(arguments)), 2);
+    }
+
+    #[test]
+    fn successful_identical_call_does_not_contribute_to_malformed_repeat_limit() {
+        let arguments = r#"{"targets":["agent-1"]} trailing"#;
+        let items = [
+            function_call("wait_agent", arguments, "successful-call"),
+            successful_function_output("successful-call"),
+        ];
+
+        assert_eq!(malformed_attempt_count(&items, &wait_call(arguments)), 1);
     }
 
     #[test]

@@ -13,6 +13,7 @@ use crate::parse_turn_item;
 use crate::session::session::Session;
 use crate::session::turn_context::TurnContext;
 use crate::tools::parallel::ToolCallRuntime;
+use crate::tools::parallel::malformed_function_call_output;
 use crate::tools::parallel::repeated_malformed_function_call_error;
 use crate::tools::router::ToolRouter;
 use crate::tools::router::tool_log_payload;
@@ -383,13 +384,13 @@ pub(crate) async fn handle_output_item_done(
                     return Err(err);
                 }
             }
-            let response = ResponseInputItem::FunctionCallOutput {
-                call_id: String::new(),
-                output: FunctionCallOutputPayload {
-                    body: FunctionCallOutputBody::Text(message),
-                    ..Default::default()
+            let response = malformed_function_call_output(
+                match &item {
+                    ResponseItem::FunctionCall { call_id, .. } => call_id.clone(),
+                    _ => String::new(),
                 },
-            };
+                message,
+            );
             record_completed_response_item(ctx.sess.as_ref(), ctx.turn_context.as_ref(), &item)
                 .await;
             if let Some(response_item) = response_input_to_response_item(&response) {
