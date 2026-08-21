@@ -2302,6 +2302,12 @@ async fn try_run_sampling_request(
 
         let sampling_budget_is_tighter =
             sampling_time_remaining.is_some_and(|remaining| remaining <= stream_idle_timeout);
+        if sampling_time_remaining.is_some_and(|remaining| remaining.is_zero()) {
+            let timeout = sampling_timeout.unwrap_or_default();
+            break Err(CodexErr::Stream(format!(
+                "sampling deadline exceeded after {timeout:?}"
+            )));
+        }
         let receive_timeout = sampling_time_remaining
             .map(|remaining| remaining.min(stream_idle_timeout))
             .unwrap_or(stream_idle_timeout);
@@ -2310,28 +2316,24 @@ async fn try_run_sampling_request(
             .next()
             .instrument(trace_span!(parent: &handle_responses, "receiving"))
             .or_cancel(&cancellation_token);
-        let receive_result = if receive_timeout.is_zero() {
-            None
-        } else {
-            Some(tokio::time::timeout(receive_timeout, receive).await)
-        };
+        let receive_result = tokio::time::timeout(receive_timeout, receive).await;
         if let Some(remaining) = sampling_time_remaining.as_mut() {
             *remaining = remaining.saturating_sub(receive_started.elapsed());
         }
         let event = match receive_result {
-            Some(Ok(Ok(Some(Ok(event))))) => Ok(event),
-            Some(Ok(Ok(Some(Err(err))))) => Err(err),
-            Some(Ok(Ok(None))) => Err(CodexErr::Stream(
+            Ok(Ok(Some(Ok(event)))) => Ok(event),
+            Ok(Ok(Some(Err(err)))) => Err(err),
+            Ok(Ok(None)) => Err(CodexErr::Stream(
                 "stream closed before response.completed".into(),
             )),
-            Some(Ok(Err(codex_async_utils::CancelErr::Cancelled))) => Err(CodexErr::TurnAborted),
-            None | Some(Err(_)) if sampling_budget_is_tighter => match sampling_timeout {
+            Ok(Err(codex_async_utils::CancelErr::Cancelled)) => Err(CodexErr::TurnAborted),
+            Err(_) if sampling_budget_is_tighter => match sampling_timeout {
                 Some(timeout) => Err(CodexErr::Stream(format!(
                     "sampling deadline exceeded after {timeout:?}"
                 ))),
                 None => unreachable!("sampling budget cannot be tighter without a timeout"),
             },
-            None | Some(Err(_)) => Err(CodexErr::Stream(format!(
+            Err(_) => Err(CodexErr::Stream(format!(
                 "idle timeout waiting for response event after {stream_idle_timeout:?}"
             ))),
         };

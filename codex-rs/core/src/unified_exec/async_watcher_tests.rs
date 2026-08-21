@@ -337,9 +337,20 @@ async fn exit_watcher_waits_for_active_interaction_event_before_terminal_event()
         context,
         rx_event,
     } = streaming_output_harness().await?;
-    let publication_guard = process
-        .try_begin_interaction_event()
-        .expect("claim interaction event publication");
+    let (publication_started_tx, publication_started_rx) = tokio::sync::oneshot::channel();
+    let (publication_release_tx, publication_release_rx) = tokio::sync::oneshot::channel();
+    let publication_process = Arc::clone(&process);
+    let publication_task = tokio::spawn(async move {
+        publication_process
+            .publish_interaction_event(async move {
+                let _ = publication_started_tx.send(());
+                let _ = publication_release_rx.await;
+            })
+            .await
+    });
+    publication_started_rx
+        .await
+        .expect("interaction publication started");
 
     tokio::time::pause();
     #[allow(deprecated)]
@@ -367,7 +378,13 @@ async fn exit_watcher_waits_for_active_interaction_event_before_terminal_event()
         "terminal event must not race an active interaction event"
     );
 
-    drop(publication_guard);
+    publication_release_tx
+        .send(())
+        .expect("release interaction publication");
+    assert!(
+        publication_task.await.expect("publication task"),
+        "interaction event should publish before terminal claim"
+    );
     let event = tokio::time::timeout(Duration::from_secs(1), rx_event.recv())
         .await
         .expect("terminal event should follow interaction publication")
@@ -388,9 +405,19 @@ async fn exit_watcher_recovers_from_stuck_interaction_event_publication() -> any
         context,
         rx_event,
     } = streaming_output_harness().await?;
-    let _publication_guard = process
-        .try_begin_interaction_event()
-        .expect("claim interaction event publication");
+    let (publication_started_tx, publication_started_rx) = tokio::sync::oneshot::channel();
+    let publication_process = Arc::clone(&process);
+    let publication_task = tokio::spawn(async move {
+        publication_process
+            .publish_interaction_event(async move {
+                let _ = publication_started_tx.send(());
+                std::future::pending::<()>().await;
+            })
+            .await
+    });
+    publication_started_rx
+        .await
+        .expect("interaction publication started");
 
     tokio::time::pause();
     #[allow(deprecated)]
@@ -413,13 +440,17 @@ async fn exit_watcher_recovers_from_stuck_interaction_event_publication() -> any
     exit_tx.send(0).expect("send exit");
     drop(stdout_tx);
     tokio::task::yield_now().await;
-    tokio::time::advance(Duration::from_secs(12)).await;
+    tokio::time::advance(Duration::from_secs(11)).await;
     let event = tokio::time::timeout(Duration::from_secs(1), rx_event.recv())
         .await
         .expect("terminal event should recover after bounded interaction publication")
         .expect("command end event");
     tokio::time::resume();
 
+    assert!(
+        publication_task.await.expect("publication task"),
+        "bounded interaction publication should finish before terminal event"
+    );
     assert!(matches!(event.msg, EventMsg::ItemCompleted(_)));
     Ok(())
 }
