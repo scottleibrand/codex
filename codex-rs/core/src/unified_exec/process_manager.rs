@@ -12,6 +12,8 @@ use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
+const INTERACTION_EVENT_PUBLICATION_TIMEOUT: Duration = Duration::from_secs(5);
+
 use crate::codex_thread::BackgroundTerminalInfo;
 use crate::exec_env::CODEX_PERMISSION_PROFILE_ENV_VAR;
 use crate::exec_env::CODEX_THREAD_ID_ENV_VAR;
@@ -928,9 +930,18 @@ impl UnifiedExecProcessManager {
                         .to_string(),
                     stdin: request.input.to_string(),
                 };
-                session
-                    .send_event(turn.as_ref(), EventMsg::TerminalInteraction(interaction))
-                    .await;
+                if tokio::time::timeout(
+                    INTERACTION_EVENT_PUBLICATION_TIMEOUT,
+                    session.send_event(turn.as_ref(), EventMsg::TerminalInteraction(interaction)),
+                )
+                .await
+                .is_err()
+                {
+                    tracing::warn!(
+                        process_id = request.process_id,
+                        "timed out publishing terminal interaction event"
+                    );
+                }
             } else {
                 tracing::debug!(
                     process_id = request.process_id,

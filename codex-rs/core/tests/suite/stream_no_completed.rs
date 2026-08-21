@@ -382,7 +382,7 @@ async fn sampling_deadline_retries_then_completes() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn sampling_deadline_resets_after_each_provider_event() {
+async fn sampling_deadline_accumulates_provider_wait_across_events() {
     skip_if_no_network!();
 
     let (created_tx, created_rx) = oneshot::channel::<()>();
@@ -406,14 +406,6 @@ async fn sampling_deadline_resets_after_each_provider_event() {
         },
     ];
     let (server, _) = start_streaming_sse_server(vec![delayed_stream]).await;
-    tokio::spawn(async move {
-        tokio::time::sleep(Duration::from_millis(100)).await;
-        let _ = created_tx.send(());
-        tokio::time::sleep(Duration::from_millis(100)).await;
-        let _ = message_tx.send(());
-        tokio::time::sleep(Duration::from_millis(100)).await;
-        let _ = completed_tx.send(());
-    });
 
     let model_provider = ModelProviderInfo {
         name: "Amazon Bedrock".into(),
@@ -453,20 +445,32 @@ async fn sampling_deadline_resets_after_each_provider_event() {
         }]))
         .await
         .unwrap();
+    server.wait_for_request_count(1).await;
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(90)).await;
+        let _ = created_tx.send(());
+        tokio::time::sleep(Duration::from_millis(90)).await;
+        let _ = message_tx.send(());
+        tokio::time::sleep(Duration::from_millis(90)).await;
+        let _ = completed_tx.send(());
+    });
 
     let EventMsg::TurnComplete(completed) = tokio::time::timeout(
         Duration::from_secs(5),
         wait_for_event(&codex, |event| matches!(event, EventMsg::TurnComplete(_))),
     )
     .await
-    .expect("progress events should reset the sampling deadline") else {
+    .expect("cumulative sampling deadline should complete the turn with an error") else {
         unreachable!("predicate guarantees a turn complete event");
     };
-    assert_eq!(completed.error, None);
+    let error = completed
+        .error
+        .expect("cumulative provider wait should exceed the sampling deadline");
+    assert!(error.message.contains("sampling deadline exceeded"));
     assert_eq!(
         server.requests().await.len(),
         1,
-        "progress within each sampling window must not retry the model request"
+        "sampling retries are disabled for this cumulative-budget test"
     );
 
     server.shutdown().await;

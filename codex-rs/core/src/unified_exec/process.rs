@@ -90,7 +90,12 @@ pub(super) struct InteractionEventPublicationGuard {
 
 impl Drop for InteractionEventPublicationGuard {
     fn drop(&mut self) {
-        self.state.store(EVENT_PUBLICATION_IDLE, Ordering::Release);
+        let _ = self.state.compare_exchange(
+            INTERACTION_EVENT_PUBLISHING,
+            EVENT_PUBLICATION_IDLE,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        );
         self.notify.notify_waiters();
     }
 }
@@ -246,6 +251,12 @@ impl UnifiedExecProcess {
                 }
             }
         }
+    }
+
+    pub(super) fn force_claim_terminal_event(&self) -> bool {
+        self.event_publication_state
+            .swap(TERMINAL_EVENT_CLAIMED, Ordering::AcqRel)
+            != TERMINAL_EVENT_CLAIMED
     }
 
     pub(super) fn has_exited(&self) -> bool {
