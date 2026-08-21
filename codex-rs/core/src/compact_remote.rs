@@ -54,6 +54,7 @@ const CONTEXT_WINDOW_TRUNCATED_OUTPUT_MESSAGE: &str =
     "Output exceeded the available model context and was truncated";
 const MAX_REQUIRED_POST_COMPACTION_HEADROOM_TOKENS: i64 = 64_000;
 pub(crate) const POST_COMPACTION_REQUEST_ENVELOPE_TOKENS: i64 = 8_192;
+const POST_COMPACTION_TOOL_SERIALIZATION_FALLBACK_TOKENS: i64 = 16_384;
 
 pub(crate) fn remote_compact_error_is_context_overflow(error: &CodexErr) -> bool {
     if matches!(error.details(), CodexErrorDetails::ContextWindowExceeded) {
@@ -334,11 +335,11 @@ async fn run_remote_compact_task_inner_impl(
             required_headroom,
             "remote compaction left insufficient context headroom; starting a fresh context window"
         );
-        let world_state = match world_state_baseline {
-            Some(world_state) => world_state,
-            None => Arc::new(sess.build_world_state_for_step(step_context).await?),
-        };
-        sess.start_new_context_window(step_context, world_state)
+        let world_state = Arc::new(
+            sess.build_world_state_for_step(compaction_step_context)
+                .await?,
+        );
+        sess.start_new_context_window(compaction_step_context, world_state)
             .await;
         if let Some(trace_input_history) = trace_input_history.as_deref() {
             let replacement_history = sess
@@ -403,9 +404,18 @@ pub(crate) fn estimate_compacted_history_tokens<'a>(
     tools: &[ToolSpec],
 ) -> i64 {
     let base_tokens = i64::try_from(approx_token_count(base_instructions)).unwrap_or(i64::MAX);
-    let tool_tokens = serde_json::to_string(tools)
-        .map(|tools| i64::try_from(approx_token_count(&tools)).unwrap_or(i64::MAX))
-        .unwrap_or(i64::MAX);
+    let tool_tokens = match serde_json::to_string(tools) {
+        Ok(tools) => i64::try_from(approx_token_count(&tools))
+            .unwrap_or(POST_COMPACTION_TOOL_SERIALIZATION_FALLBACK_TOKENS),
+        Err(error) => {
+            warn!(
+                %error,
+                fallback_tokens = POST_COMPACTION_TOOL_SERIALIZATION_FALLBACK_TOKENS,
+                "failed to serialize tool specs while estimating post-compaction headroom"
+            );
+            POST_COMPACTION_TOOL_SERIALIZATION_FALLBACK_TOKENS
+        }
+    };
     history
         .into_iter()
         .map(estimate_item_token_count)

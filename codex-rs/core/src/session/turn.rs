@@ -2289,25 +2289,27 @@ async fn try_run_sampling_request(
             .map(|remaining| remaining.min(stream_idle_timeout))
             .unwrap_or(stream_idle_timeout);
         let receive_started = Instant::now();
-        let receive_result = tokio::time::timeout(
-            receive_timeout,
-            stream
-                .next()
-                .instrument(trace_span!(parent: &handle_responses, "receiving"))
-                .or_cancel(&cancellation_token),
-        )
-        .await;
+        let receive = stream
+            .next()
+            .instrument(trace_span!(parent: &handle_responses, "receiving"))
+            .or_cancel(&cancellation_token);
+        let receive_result = if receive_timeout.is_zero() {
+            let mut receive = std::pin::pin!(receive);
+            receive.as_mut().now_or_never().map(Ok)
+        } else {
+            Some(tokio::time::timeout(receive_timeout, receive).await)
+        };
         if let Some(remaining) = sampling_time_remaining.as_mut() {
             *remaining = remaining.saturating_sub(receive_started.elapsed());
         }
         let event = match receive_result {
-            Ok(Ok(Some(Ok(event)))) => Ok(event),
-            Ok(Ok(Some(Err(err)))) => Err(err),
-            Ok(Ok(None)) => Err(CodexErr::Stream(
+            Some(Ok(Ok(Some(Ok(event))))) => Ok(event),
+            Some(Ok(Ok(Some(Err(err))))) => Err(err),
+            Some(Ok(Ok(None))) => Err(CodexErr::Stream(
                 "stream closed before response.completed".into(),
             )),
-            Ok(Err(codex_async_utils::CancelErr::Cancelled)) => Err(CodexErr::TurnAborted),
-            Err(_) if sampling_budget_is_tighter => match sampling_timeout {
+            Some(Ok(Err(codex_async_utils::CancelErr::Cancelled))) => Err(CodexErr::TurnAborted),
+            None | Some(Err(_)) if sampling_budget_is_tighter => match sampling_timeout {
                 Some(timeout) => Err(CodexErr::Stream(format!(
                     "sampling deadline exceeded after {timeout:?}"
                 ))),
@@ -2315,7 +2317,7 @@ async fn try_run_sampling_request(
                     "idle timeout waiting for response event after {stream_idle_timeout:?}"
                 ))),
             },
-            Err(_) => Err(CodexErr::Stream(format!(
+            None | Some(Err(_)) => Err(CodexErr::Stream(format!(
                 "idle timeout waiting for response event after {stream_idle_timeout:?}"
             ))),
         };

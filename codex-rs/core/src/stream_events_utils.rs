@@ -363,34 +363,31 @@ pub(crate) async fn handle_output_item_done(
         }
         // The tool request should be answered directly (or was denied); push that response into the transcript.
         Err(FunctionCallError::MalformedArguments(message)) => {
-            if let ResponseItem::FunctionCall {
+            let ResponseItem::FunctionCall {
                 name,
                 namespace,
                 arguments,
                 call_id,
                 ..
             } = &item
+            else {
+                return Err(CodexErr::InvalidRequest(format!(
+                    "malformed function arguments were reported for a non-function item: {message}"
+                )));
+            };
+            let tool_name =
+                codex_tools::ToolName::new(namespace.clone(), name).with_default_namespace();
+            if let Some(err) = repeated_malformed_function_call_error(
+                ctx.sess.as_ref(),
+                &tool_name,
+                arguments,
+                call_id,
+            )
+            .await
             {
-                let tool_name =
-                    codex_tools::ToolName::new(namespace.clone(), name).with_default_namespace();
-                if let Some(err) = repeated_malformed_function_call_error(
-                    ctx.sess.as_ref(),
-                    &tool_name,
-                    arguments,
-                    call_id,
-                )
-                .await
-                {
-                    return Err(err);
-                }
+                return Err(err);
             }
-            let response = malformed_function_call_output(
-                match &item {
-                    ResponseItem::FunctionCall { call_id, .. } => call_id.clone(),
-                    _ => String::new(),
-                },
-                message,
-            );
+            let response = malformed_function_call_output(call_id.clone(), message);
             record_completed_response_item(ctx.sess.as_ref(), ctx.turn_context.as_ref(), &item)
                 .await;
             if let Some(response_item) = response_input_to_response_item(&response) {

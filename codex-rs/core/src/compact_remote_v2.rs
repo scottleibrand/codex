@@ -343,11 +343,11 @@ async fn run_remote_compact_task_inner_impl(
             required_headroom,
             "remote compaction left insufficient context headroom; starting a fresh context window"
         );
-        let world_state = match world_state_baseline {
-            Some(world_state) => world_state,
-            None => Arc::new(sess.build_world_state_for_step(step_context).await?),
-        };
-        sess.start_new_context_window(step_context, world_state)
+        let world_state = Arc::new(
+            sess.build_world_state_for_step(compaction_step_context)
+                .await?,
+        );
+        sess.start_new_context_window(compaction_step_context, world_state)
             .await;
         if let Some(trace_input_history) = trace_input_history.as_deref() {
             let replacement_history = sess
@@ -549,10 +549,7 @@ fn build_v2_compacted_history(
 }
 
 fn replace_historical_input_images_before_last_compaction(items: &mut [ResponseItem]) -> usize {
-    let Some(last_compaction_index) = items
-        .iter()
-        .rposition(|item| matches!(item, ResponseItem::Compaction { .. }))
-    else {
+    let Some(last_compaction_index) = items.iter().rposition(is_compaction_boundary) else {
         return 0;
     };
 
@@ -574,17 +571,22 @@ fn replace_input_images_with_compaction_placeholder_in_envelopes(
 fn replace_historical_input_images_before_last_compaction_in_envelopes(
     items: &mut [ResponseItemEnvelope],
 ) -> usize {
-    let Some(last_compaction_index) = items.iter().rposition(|envelope| {
-        matches!(
-            envelope.item,
-            ResponseItem::Compaction { .. } | ResponseItem::ContextCompaction { .. }
-        )
-    }) else {
+    let Some(last_compaction_index) = items
+        .iter()
+        .rposition(|envelope| is_compaction_boundary(&envelope.item))
+    else {
         return 0;
     };
 
     replace_input_images_with_compaction_placeholder_in_envelopes(
         &mut items[..last_compaction_index],
+    )
+}
+
+fn is_compaction_boundary(item: &ResponseItem) -> bool {
+    matches!(
+        item,
+        ResponseItem::Compaction { .. } | ResponseItem::ContextCompaction { .. }
     )
 }
 
@@ -1122,6 +1124,46 @@ mod tests {
                 ResponseItem::Compaction {
                     id: None,
                     encrypted_content: "summary".to_string(),
+                    internal_chat_message_metadata_passthrough: None,
+                },
+                current_image,
+            ]
+        );
+    }
+
+    #[test]
+    fn repeat_compaction_recognizes_context_compaction_boundary() {
+        let image_message = |image_url: &str| ResponseItem::Message {
+            id: None,
+            role: "user".to_string(),
+            content: vec![ContentItem::InputImage {
+                image_url: image_url.to_string(),
+                detail: None,
+            }],
+            phase: None,
+            internal_chat_message_metadata_passthrough: None,
+        };
+        let current_image = image_message("data:image/png;base64,current");
+        let mut input = vec![
+            image_message("data:image/png;base64,old"),
+            ResponseItem::ContextCompaction {
+                id: None,
+                encrypted_content: Some("summary".to_string()),
+                internal_chat_message_metadata_passthrough: None,
+            },
+            current_image.clone(),
+        ];
+
+        let replaced = replace_historical_input_images_before_last_compaction(&mut input);
+
+        assert_eq!(replaced, 1);
+        assert_eq!(
+            input,
+            vec![
+                message("user", OMITTED_IMAGE_PLACEHOLDER, /*phase*/ None),
+                ResponseItem::ContextCompaction {
+                    id: None,
+                    encrypted_content: Some("summary".to_string()),
                     internal_chat_message_metadata_passthrough: None,
                 },
                 current_image,
