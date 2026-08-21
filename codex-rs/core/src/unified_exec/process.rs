@@ -1,5 +1,6 @@
 #![allow(clippy::module_inception)]
 
+use std::future::Future;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::AtomicU8;
@@ -37,6 +38,8 @@ use super::head_tail_buffer::HeadTailBuffer;
 use super::process_state::ProcessState;
 
 const EARLY_EXIT_GRACE_PERIOD: Duration = Duration::from_millis(150);
+const INTERACTION_EVENT_PUBLICATION_TIMEOUT: Duration = Duration::from_secs(5);
+const TERMINAL_EVENT_CLAIM_GRACE_PERIOD: Duration = Duration::from_secs(1);
 const EVENT_PUBLICATION_IDLE: u8 = 0;
 const INTERACTION_EVENT_PUBLISHING: u8 = 1;
 const TERMINAL_EVENT_CLAIMED: u8 = 2;
@@ -211,7 +214,7 @@ impl UnifiedExecProcess {
         Arc::clone(&self.interaction_lock)
     }
 
-    pub(super) fn try_begin_interaction_event(&self) -> Option<InteractionEventPublicationGuard> {
+    fn begin_interaction_event(&self) -> Option<InteractionEventPublicationGuard> {
         self.event_publication_state
             .compare_exchange(
                 EVENT_PUBLICATION_IDLE,
@@ -224,6 +227,27 @@ impl UnifiedExecProcess {
                 state: Arc::clone(&self.event_publication_state),
                 notify: Arc::clone(&self.event_publication_notify),
             })
+    }
+
+    #[cfg(test)]
+    pub(super) fn try_begin_interaction_event(&self) -> Option<InteractionEventPublicationGuard> {
+        self.begin_interaction_event()
+    }
+
+    pub(super) async fn publish_interaction_event<F>(&self, event: F) -> bool
+    where
+        F: Future<Output = ()>,
+    {
+        let Some(_publication_guard) = self.begin_interaction_event() else {
+            return false;
+        };
+        if tokio::time::timeout(INTERACTION_EVENT_PUBLICATION_TIMEOUT, event)
+            .await
+            .is_err()
+        {
+            tracing::warn!("timed out publishing terminal interaction event");
+        }
+        true
     }
 
     pub(super) async fn claim_terminal_event(&self) -> bool {
@@ -244,7 +268,38 @@ impl UnifiedExecProcess {
                     {
                         continue;
                     }
-                    notified.await;
+                    if tokio::time::timeout(
+                        INTERACTION_EVENT_PUBLICATION_TIMEOUT
+                            .saturating_add(TERMINAL_EVENT_CLAIM_GRACE_PERIOD),
+                        notified,
+                    )
+                    .await
+                    .is_err()
+                    {
+                        match self.event_publication_state.compare_exchange(
+                            INTERACTION_EVENT_PUBLISHING,
+                            TERMINAL_EVENT_CLAIMED,
+                            Ordering::AcqRel,
+                            Ordering::Acquire,
+                        ) {
+                            Ok(_) => {
+                                tracing::warn!(
+                                    "interaction event publication exceeded its bounded lifetime; \
+                                     claiming terminal event"
+                                );
+                                return true;
+                            }
+                            Err(TERMINAL_EVENT_CLAIMED) => return false,
+                            Err(EVENT_PUBLICATION_IDLE) => continue,
+                            Err(state) => {
+                                tracing::error!(
+                                    state,
+                                    "invalid unified-exec event publication state"
+                                );
+                                return false;
+                            }
+                        }
+                    }
                 }
                 Err(state) => {
                     tracing::error!(state, "invalid unified-exec event publication state");

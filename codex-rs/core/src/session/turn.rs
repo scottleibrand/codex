@@ -2300,43 +2300,40 @@ async fn try_run_sampling_request(
             codex.usage.total_tokens = field::Empty,
         );
 
-        let receive_event = async {
-            let event = match tokio::time::timeout(
-                stream_idle_timeout,
-                stream
-                    .next()
-                    .instrument(trace_span!(parent: &handle_responses, "receiving"))
-                    .or_cancel(&cancellation_token),
-            )
-            .await
-            {
-                Ok(Ok(event)) => event,
-                Ok(Err(codex_async_utils::CancelErr::Cancelled)) => {
-                    return Err(CodexErr::TurnAborted);
-                }
-                Err(_) => {
-                    return Err(CodexErr::Stream(format!(
-                        "idle timeout waiting for response event after {stream_idle_timeout:?}"
-                    )));
-                }
-            };
-
-            match event {
-                Some(Ok(event)) => Ok(event),
-                Some(Err(err)) => Err(err),
-                None => Err(CodexErr::Stream(
-                    "stream closed before response.completed".into(),
-                )),
-            }
+        let sampling_budget_is_tighter =
+            sampling_time_remaining.is_some_and(|remaining| remaining <= stream_idle_timeout);
+        let receive_timeout = sampling_time_remaining
+            .map(|remaining| remaining.min(stream_idle_timeout))
+            .unwrap_or(stream_idle_timeout);
+        let receive_started = tokio::time::Instant::now();
+        let receive = stream
+            .next()
+            .instrument(trace_span!(parent: &handle_responses, "receiving"))
+            .or_cancel(&cancellation_token);
+        let receive_result = if receive_timeout.is_zero() {
+            None
+        } else {
+            Some(tokio::time::timeout(receive_timeout, receive).await)
         };
-        let event = match sampling_timeout {
-            Some(timeout) => match tokio::time::timeout(timeout, receive_event).await {
-                Ok(result) => result,
-                Err(_) => Err(CodexErr::Stream(format!(
+        if let Some(remaining) = sampling_time_remaining.as_mut() {
+            *remaining = remaining.saturating_sub(receive_started.elapsed());
+        }
+        let event = match receive_result {
+            Some(Ok(Ok(Some(Ok(event))))) => Ok(event),
+            Some(Ok(Ok(Some(Err(err))))) => Err(err),
+            Some(Ok(Ok(None))) => Err(CodexErr::Stream(
+                "stream closed before response.completed".into(),
+            )),
+            Some(Ok(Err(codex_async_utils::CancelErr::Cancelled))) => Err(CodexErr::TurnAborted),
+            None | Some(Err(_)) if sampling_budget_is_tighter => match sampling_timeout {
+                Some(timeout) => Err(CodexErr::Stream(format!(
                     "sampling deadline exceeded after {timeout:?}"
                 ))),
+                None => unreachable!("sampling budget cannot be tighter without a timeout"),
             },
-            None => receive_event.await,
+            None | Some(Err(_)) => Err(CodexErr::Stream(format!(
+                "idle timeout waiting for response event after {stream_idle_timeout:?}"
+            ))),
         };
         let event = match event {
             Ok(event) => event,

@@ -12,8 +12,6 @@ use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
-const INTERACTION_EVENT_PUBLICATION_TIMEOUT: Duration = Duration::from_secs(5);
-
 use crate::codex_thread::BackgroundTerminalInfo;
 use crate::exec_env::CODEX_PERMISSION_PROFILE_ENV_VAR;
 use crate::exec_env::CODEX_THREAD_ID_ENV_VAR;
@@ -921,28 +919,20 @@ impl UnifiedExecProcessManager {
         if should_emit_interaction
             && let Some(WriteStdinInteractionEvent { session, turn }) = request.interaction_event
         {
-            if let Some(_publication_guard) = process.try_begin_interaction_event() {
-                let interaction = TerminalInteractionEvent {
-                    call_id: response.event_call_id.clone(),
-                    process_id: response
-                        .process_id
-                        .unwrap_or(request.process_id)
-                        .to_string(),
-                    stdin: request.input.to_string(),
-                };
-                if tokio::time::timeout(
-                    INTERACTION_EVENT_PUBLICATION_TIMEOUT,
+            let interaction = TerminalInteractionEvent {
+                call_id: response.event_call_id.clone(),
+                process_id: response
+                    .process_id
+                    .unwrap_or(request.process_id)
+                    .to_string(),
+                stdin: request.input.to_string(),
+            };
+            if !process
+                .publish_interaction_event(
                     session.send_event(turn.as_ref(), EventMsg::TerminalInteraction(interaction)),
                 )
                 .await
-                .is_err()
-                {
-                    tracing::warn!(
-                        process_id = request.process_id,
-                        "timed out publishing terminal interaction event"
-                    );
-                }
-            } else {
+            {
                 tracing::debug!(
                     process_id = request.process_id,
                     "suppressing terminal interaction after terminal event was claimed"
