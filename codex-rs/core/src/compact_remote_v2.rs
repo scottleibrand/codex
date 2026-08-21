@@ -535,12 +535,13 @@ fn build_v2_compacted_history(
     image_budget: RetainedImageBudget,
 ) -> (Vec<ResponseItemEnvelope>, usize) {
     debug_assert_eq!(prompt_input.len(), prompt_input_metadata.len());
-    let prompt_input = prompt_input
+    let mut prompt_input = prompt_input
         .into_iter()
         .zip(prompt_input_metadata)
         .map(|(item, metadata)| ResponseItemEnvelope { item, metadata })
         .collect::<Vec<_>>();
-    let mut retained = v2_history_item_groups(prompt_input)
+    replace_historical_input_images_before_last_compaction_in_envelopes(&mut prompt_input);
+    let retained = v2_history_item_groups(prompt_input)
         .filter(|group| is_retained_for_remote_compaction_v2(&group.source.item))
         .filter(|group| {
             should_keep_compacted_history_item(&group.source.item)
@@ -549,7 +550,6 @@ fn build_v2_compacted_history(
         })
         .flat_map(HistoryItemGroup::into_items)
         .collect::<Vec<_>>();
-    replace_input_images_with_compaction_placeholder_in_envelopes(&mut retained);
     let mut retained =
         truncate_retained_messages(retained, RETAINED_MESSAGE_TOKEN_BUDGET, image_budget);
     let retained_image_count = retained
@@ -581,6 +581,23 @@ fn replace_input_images_with_compaction_placeholder_in_envelopes(
         ));
     }
     replaced
+}
+
+fn replace_historical_input_images_before_last_compaction_in_envelopes(
+    items: &mut [ResponseItemEnvelope],
+) -> usize {
+    let Some(last_compaction_index) = items.iter().rposition(|envelope| {
+        matches!(
+            envelope.item,
+            ResponseItem::Compaction { .. } | ResponseItem::ContextCompaction { .. }
+        )
+    }) else {
+        return 0;
+    };
+
+    replace_input_images_with_compaction_placeholder_in_envelopes(
+        &mut items[..last_compaction_index],
+    )
 }
 
 fn replace_input_images_with_compaction_placeholder(items: &mut [ResponseItem]) -> usize {
@@ -1057,8 +1074,8 @@ mod tests {
     }
 
     #[test]
-    fn build_v2_compacted_history_strips_retained_input_images() {
-        let input = vec![ResponseItem::Message {
+    fn build_v2_compacted_history_preserves_current_input_images() {
+        let current_message = ResponseItem::Message {
             id: None,
             role: "user".to_string(),
             content: vec![
@@ -1076,39 +1093,18 @@ mod tests {
             ],
             phase: None,
             internal_chat_message_metadata_passthrough: None,
-        }];
+        };
         let output = ResponseItem::Compaction {
             id: None,
             encrypted_content: "new".to_string(),
             internal_chat_message_metadata_passthrough: None,
         };
 
-        let (history, retained_image_count) = build_without_metadata(input, output.clone());
+        let (history, retained_image_count) =
+            build_without_metadata(vec![current_message.clone()], output.clone());
 
-        assert_eq!(
-            raw(history),
-            vec![
-                ResponseItem::Message {
-                    id: None,
-                    role: "user".to_string(),
-                    content: vec![
-                        ContentItem::InputText {
-                            text: "user".to_string(),
-                        },
-                        ContentItem::InputText {
-                            text: OMITTED_IMAGE_PLACEHOLDER.to_string(),
-                        },
-                        ContentItem::InputText {
-                            text: OMITTED_IMAGE_PLACEHOLDER.to_string(),
-                        },
-                    ],
-                    phase: None,
-                    internal_chat_message_metadata_passthrough: None,
-                },
-                output,
-            ]
-        );
-        assert_eq!(retained_image_count, 0);
+        assert_eq!(raw(history), vec![current_message, output]);
+        assert_eq!(retained_image_count, 2);
     }
 
     #[test]
@@ -1175,15 +1171,14 @@ mod tests {
         };
         let (first_history, first_retained_image_count) =
             build_without_metadata(vec![original], first_output);
-        assert_eq!(first_retained_image_count, 0);
+        assert_eq!(first_retained_image_count, 1);
         assert!(raw(first_history.clone()).iter().any(|item| {
             matches!(
                 item,
                 ResponseItem::Message { content, .. }
                     if content.iter().any(|content_item| matches!(
                         content_item,
-                        ContentItem::InputText { text }
-                            if text == OMITTED_IMAGE_PLACEHOLDER
+                        ContentItem::InputImage { .. }
                     ))
             )
         }));

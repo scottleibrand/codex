@@ -378,56 +378,6 @@ async fn exit_watcher_waits_for_active_interaction_event_before_terminal_event()
     Ok(())
 }
 
-#[tokio::test]
-async fn exit_watcher_forces_terminal_event_after_stuck_interaction_publication()
--> anyhow::Result<()> {
-    let StreamingOutputHarness {
-        process,
-        stdout_tx,
-        exit_tx,
-        transcript,
-        context,
-        rx_event,
-    } = streaming_output_harness().await?;
-    let publication_guard = process
-        .try_begin_interaction_event()
-        .expect("claim interaction event publication");
-
-    tokio::time::pause();
-    #[allow(deprecated)]
-    let cwd = context.step_context.turn.cwd.clone().into();
-    spawn_exit_watcher(
-        Arc::clone(&process),
-        Arc::clone(&context.session),
-        Arc::clone(&context.step_context.turn),
-        context.call_id,
-        vec!["proof".to_string()],
-        cwd,
-        /*process_id*/ 123,
-        /*plugin_attribution*/ None,
-        transcript,
-        Instant::now(),
-        /*network_denial_monitor*/ None,
-        /*plugin_metrics_sidecar*/ None,
-    );
-
-    exit_tx.send(0).expect("send exit");
-    drop(stdout_tx);
-    tokio::time::advance(Duration::from_secs(16)).await;
-    tokio::task::yield_now().await;
-
-    let event = rx_event.recv().await.expect("forced command end event");
-    drop(publication_guard);
-    assert!(
-        process.try_begin_interaction_event().is_none(),
-        "forced terminal claim must remain final after the stale guard drops"
-    );
-    tokio::time::resume();
-
-    assert!(matches!(event.msg, EventMsg::ItemCompleted(_)));
-    Ok(())
-}
-
 #[test]
 fn utf8_boundary_preserves_complete_characters() {
     assert_eq!(utf8_boundary(b"hello"), 5);

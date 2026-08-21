@@ -89,9 +89,11 @@ impl ToolCallRuntime {
                 Ok(response) => Ok(response.into_response()),
                 Err(FunctionCallError::Fatal(message)) => Err(CodexErr::Fatal(message)),
                 Err(FunctionCallError::MalformedArguments(message)) => {
-                    let arguments = match &error_call.payload {
-                        ToolPayload::Function { arguments } => arguments.as_str(),
-                        _ => "",
+                    let ToolPayload::Function { arguments } = &error_call.payload else {
+                        return Ok(Self::failure_response(
+                            error_call,
+                            FunctionCallError::MalformedArguments(message),
+                        ));
                     };
                     if let Some(err) = repeated_malformed_function_call_error(
                         error_session.as_ref(),

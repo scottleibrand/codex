@@ -237,7 +237,8 @@ impl UnifiedExecProcess {
                 Ok(_) => return true,
                 Err(TERMINAL_EVENT_CLAIMED) => return false,
                 Err(INTERACTION_EVENT_PUBLISHING) => {
-                    let notified = self.event_publication_notify.notified();
+                    let mut notified = std::pin::pin!(self.event_publication_notify.notified());
+                    notified.as_mut().enable();
                     if self.event_publication_state.load(Ordering::Acquire)
                         != INTERACTION_EVENT_PUBLISHING
                     {
@@ -251,12 +252,6 @@ impl UnifiedExecProcess {
                 }
             }
         }
-    }
-
-    pub(super) fn force_claim_terminal_event(&self) -> bool {
-        self.event_publication_state
-            .swap(TERMINAL_EVENT_CLAIMED, Ordering::AcqRel)
-            != TERMINAL_EVENT_CLAIMED
     }
 
     pub(super) fn has_exited(&self) -> bool {
