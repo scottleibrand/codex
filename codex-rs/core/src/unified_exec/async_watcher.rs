@@ -31,6 +31,7 @@ use codex_protocol::protocol::ExecOutputStream;
 use codex_utils_path_uri::PathUri;
 
 pub(crate) const TRAILING_OUTPUT_GRACE: Duration = Duration::from_millis(100);
+const TERMINAL_EVENT_FINALIZATION_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Upper bound for a single ExecCommandOutputDelta chunk emitted by unified exec.
 ///
@@ -182,14 +183,56 @@ pub(crate) fn spawn_exit_watcher(
 
     tokio::spawn(async move {
         exit_token.cancelled().await;
-        output_drained.notified().await;
+        if tokio::time::timeout(
+            TERMINAL_EVENT_FINALIZATION_TIMEOUT,
+            output_drained.notified(),
+        )
+        .await
+        .is_err()
+        {
+            tracing::warn!(
+                call_id,
+                process_id,
+                stage = "output_drain",
+                "timed out finalizing exited command; emitting terminal event"
+            );
+        }
         // Deferred network denial deliberately remains observable for a short
         // window after process exit. Do not classify the terminal event until
         // that monitor has settled, even when output closes immediately.
-        if let Some(network_denial_monitor) = network_denial_monitor {
-            let _ = network_denial_monitor.await;
+        if let Some(mut network_denial_monitor) = network_denial_monitor
+            && tokio::time::timeout(
+                TERMINAL_EVENT_FINALIZATION_TIMEOUT,
+                &mut network_denial_monitor,
+            )
+            .await
+            .is_err()
+        {
+            tracing::warn!(
+                call_id,
+                process_id,
+                stage = "network_denial",
+                "timed out finalizing exited command; emitting terminal event"
+            );
+            network_denial_monitor.abort();
         }
-        let _interaction_guard = interaction_lock.lock_owned().await;
+        let _interaction_guard = match tokio::time::timeout(
+            TERMINAL_EVENT_FINALIZATION_TIMEOUT,
+            interaction_lock.lock_owned(),
+        )
+        .await
+        {
+            Ok(guard) => Some(guard),
+            Err(_) => {
+                tracing::warn!(
+                    call_id,
+                    process_id,
+                    stage = "interaction_lock",
+                    "timed out finalizing exited command; emitting terminal event"
+                );
+                None
+            }
+        };
 
         let duration = Instant::now().saturating_duration_since(started_at);
         let plugin_metrics_sidecar = plugin_metrics_sidecar
