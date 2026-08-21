@@ -664,11 +664,12 @@ fn turn_user_input(input: &[TurnInput]) -> Vec<UserInput> {
 
 fn estimate_turn_input_tokens(input: &[TurnInput]) -> i64 {
     const TURN_INPUT_SERIALIZATION_FALLBACK_TOKENS: i64 = 16_384;
+    const TURN_INPUT_TRANSFORMATION_MARGIN_TOKENS: i64 = 1_024;
     match serde_json::to_string(input) {
         Ok(serialized) => i64::try_from(approx_token_count(&serialized))
             .unwrap_or(TURN_INPUT_SERIALIZATION_FALLBACK_TOKENS)
             .saturating_mul(2)
-            .max(TURN_INPUT_SERIALIZATION_FALLBACK_TOKENS),
+            .saturating_add(TURN_INPUT_TRANSFORMATION_MARGIN_TOKENS),
         Err(error) => {
             warn!(
                 %error,
