@@ -2895,7 +2895,7 @@ async fn guardian_context_overflow_discards_reused_trunk_before_retry() -> anyho
     let (seed_outcome, seed_metadata) = run_guardian_review_session_for_test(
         Arc::clone(&session),
         Arc::clone(&turn),
-        guardian_shell_request("shell-seed-trunk"),
+        guardian_exec_command_request("shell-seed-trunk"),
         ApprovalRequestReasons::default(),
         guardian_output_schema(),
         /*external_cancel*/ None,
@@ -2917,7 +2917,7 @@ async fn guardian_context_overflow_discards_reused_trunk_before_retry() -> anyho
     let (outcome, metadata) = run_guardian_review_session_for_test(
         Arc::clone(&session),
         Arc::clone(&turn),
-        guardian_shell_request("shell-overflow-retry"),
+        guardian_exec_command_request("shell-overflow-retry"),
         ApprovalRequestReasons {
             approval: Some(explicit_authorization.to_string()),
             retry: None,
@@ -3011,7 +3011,7 @@ async fn guardian_context_overflow_retries_fresh_exactly_once() -> anyhow::Resul
     let (seed_outcome, _) = run_guardian_review_session_for_test(
         Arc::clone(&session),
         Arc::clone(&turn),
-        guardian_shell_request("shell-seed-single-retry"),
+        guardian_exec_command_request("shell-seed-single-retry"),
         ApprovalRequestReasons::default(),
         guardian_output_schema(),
         /*external_cancel*/ None,
@@ -3030,7 +3030,7 @@ async fn guardian_context_overflow_retries_fresh_exactly_once() -> anyhow::Resul
     let (outcome, metadata) = run_guardian_review_session_for_test(
         Arc::clone(&session),
         Arc::clone(&turn),
-        guardian_shell_request(request_id),
+        guardian_exec_command_request(request_id),
         ApprovalRequestReasons {
             approval: Some("The user authorized this exact process inspection.".to_string()),
             retry: None,
@@ -3099,7 +3099,7 @@ async fn guardian_context_overflow_fails_closed_without_reconstructable_parent_s
     let (seed_outcome, _) = run_guardian_review_session_for_test(
         Arc::clone(&session),
         Arc::clone(&turn),
-        guardian_shell_request("shell-seed-incomplete-parent"),
+        guardian_exec_command_request("shell-seed-incomplete-parent"),
         ApprovalRequestReasons::default(),
         guardian_output_schema(),
         /*external_cancel*/ None,
@@ -3139,7 +3139,7 @@ async fn guardian_context_overflow_fails_closed_without_reconstructable_parent_s
     let (outcome, metadata) = run_guardian_review_session_for_test(
         Arc::clone(&session),
         Arc::clone(&turn),
-        guardian_shell_request("shell-incomplete-parent-overflow"),
+        guardian_exec_command_request("shell-incomplete-parent-overflow"),
         ApprovalRequestReasons::default(),
         guardian_output_schema(),
         /*external_cancel*/ None,

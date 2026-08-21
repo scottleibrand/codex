@@ -458,7 +458,9 @@ mod tests {
     fn function_output(call_id: &str) -> ResponseItem {
         ResponseItem::FunctionCallOutput {
             id: None,
-            call_id: call_id.to_string(),
+            call_id: Some(call_id.to_string()),
+            name: None,
+            namespace: None,
             output: FunctionCallOutputPayload::from_text("parse error".to_string()),
             internal_chat_message_metadata_passthrough: None,
         }

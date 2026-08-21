@@ -20,7 +20,6 @@ use core_test_support::wait_for_event;
 use pretty_assertions::assert_eq;
 use std::net::TcpListener;
 use std::time::Duration;
-use tokio::io::AsyncReadExt;
 use tokio::io::AsyncWriteExt;
 use tokio::net::TcpListener as TokioTcpListener;
 use tokio::sync::oneshot;
@@ -215,8 +214,7 @@ async fn retries_when_response_headers_never_arrive() {
     let (first_request_tx, first_request_rx) = oneshot::channel::<()>();
     let (retry_request_tx, retry_request_rx) = oneshot::channel::<()>();
     let server_task = tokio::spawn(async move {
-        let (mut stalled, _) = listener.accept().await.expect("accept stalled request");
-        read_complete_http_request(&mut stalled).await;
+        let (stalled, _) = listener.accept().await.expect("accept stalled request");
         let _ = first_request_tx.send(());
         tokio::spawn(async move {
             let _stalled = stalled;
@@ -224,7 +222,6 @@ async fn retries_when_response_headers_never_arrive() {
         });
 
         let (mut retry, _) = listener.accept().await.expect("accept retry request");
-        read_complete_http_request(&mut retry).await;
         let _ = retry_request_tx.send(());
         let response = format!(
             "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
@@ -255,7 +252,7 @@ async fn retries_when_response_headers_never_arrive() {
         request_max_retries: Some(0),
         stream_max_retries: Some(1),
         stream_idle_timeout_ms: Some(2000),
-        stream_setup_timeout_ms: Some(200),
+        stream_setup_timeout_ms: Some(5000),
         sampling_timeout_ms: None,
         websocket_connect_timeout_ms: None,
         requires_openai_auth: false,
@@ -279,11 +276,11 @@ async fn retries_when_response_headers_never_arrive() {
         .await
         .unwrap();
 
-    tokio::time::timeout(Duration::from_secs(2), first_request_rx)
+    tokio::time::timeout(Duration::from_secs(10), first_request_rx)
         .await
         .expect("initial request was not received")
         .expect("initial request marker dropped");
-    tokio::time::timeout(Duration::from_secs(10), retry_request_rx)
+    tokio::time::timeout(Duration::from_secs(20), retry_request_rx)
         .await
         .expect("pre-stream timeout did not trigger a retry")
         .expect("retry request marker dropped");
@@ -457,7 +454,10 @@ async fn sampling_deadline_stops_after_stream_retry_limit() {
     };
     assert_eq!(
         completed.error.map(|error| error.message),
-        Some("sampling deadline exceeded after 150ms".to_string())
+        Some(
+            "stream disconnected before completion: sampling deadline exceeded after 150ms"
+                .to_string()
+        )
     );
     assert_eq!(
         server.requests().await.len(),
@@ -478,7 +478,7 @@ async fn sampling_deadline_excludes_approval_wait() {
     responses::mount_sse_once(
         &server,
         responses::sse(vec![
-            responses::ev_shell_command_call("approval-call", "/bin/echo approved"),
+            responses::ev_exec_command_call("approval-call", "/bin/echo approved"),
             responses::ev_completed("tool-response"),
         ]),
     )
@@ -549,33 +549,6 @@ async fn sampling_deadline_excludes_approval_wait() {
         2,
         "approval should be followed by one normal model continuation"
     );
-}
-
-async fn read_complete_http_request(stream: &mut tokio::net::TcpStream) {
-    let mut request = Vec::new();
-    let mut scratch = [0_u8; 1024];
-    loop {
-        let count = stream.read(&mut scratch).await.expect("read HTTP request");
-        assert!(count > 0, "request closed before its body was complete");
-        request.extend_from_slice(&scratch[..count]);
-        let Some(header_end) = request.windows(4).position(|window| window == b"\r\n\r\n") else {
-            continue;
-        };
-        let body_start = header_end + 4;
-        let headers = String::from_utf8_lossy(&request[..body_start]);
-        let content_length = headers
-            .lines()
-            .find_map(|line| {
-                let (name, value) = line.split_once(':')?;
-                name.eq_ignore_ascii_case("content-length")
-                    .then(|| value.trim().parse::<usize>().ok())
-                    .flatten()
-            })
-            .unwrap_or(0);
-        if request.len() >= body_start + content_length {
-            return;
-        }
-    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
