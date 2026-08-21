@@ -216,7 +216,7 @@ pub(crate) fn spawn_exit_watcher(
             );
             network_denial_monitor.abort();
         }
-        let _interaction_guard = match tokio::time::timeout(
+        let interaction_guard = match tokio::time::timeout(
             TERMINAL_EVENT_FINALIZATION_TIMEOUT,
             interaction_lock.lock_owned(),
         )
@@ -228,11 +228,32 @@ pub(crate) fn spawn_exit_watcher(
                     call_id,
                     process_id,
                     stage = "interaction_lock",
-                    "timed out finalizing exited command; emitting terminal event"
+                    "timed out finalizing exited command; claiming terminal event"
                 );
                 None
             }
         };
+        let terminal_claimed = match tokio::time::timeout(
+            TERMINAL_EVENT_FINALIZATION_TIMEOUT,
+            process.claim_terminal_event(),
+        )
+        .await
+        {
+            Ok(claimed) => claimed,
+            Err(_) => {
+                tracing::warn!(
+                    call_id,
+                    process_id,
+                    stage = "event_publication",
+                    "timed out waiting for an active interaction event; terminal event deferred"
+                );
+                return;
+            }
+        };
+        if !terminal_claimed {
+            tracing::debug!(call_id, process_id, "terminal event already claimed");
+            return;
+        }
 
         let duration = Instant::now().saturating_duration_since(started_at);
         let plugin_metrics_sidecar = plugin_metrics_sidecar
@@ -279,6 +300,7 @@ pub(crate) fn spawn_exit_watcher(
             )
             .await;
         }
+        drop(interaction_guard);
     });
 }
 
