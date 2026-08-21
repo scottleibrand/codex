@@ -1496,8 +1496,8 @@ impl UnifiedExecProcessManager {
                 return None;
             }
 
-            // Do not prune processes while write_stdin or terminal event
-            // publication holds their interaction lock.
+            // Do not prune processes while write_stdin holds their process-I/O lock.
+            // Event publication uses UnifiedExecProcess's separate semaphore.
             if let Some(interaction_lock) = candidate_process
                 .as_ref()
                 .map(|process| process.interaction_lock())

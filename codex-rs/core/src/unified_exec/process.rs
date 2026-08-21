@@ -190,6 +190,8 @@ impl UnifiedExecProcess {
     }
 
     pub(super) fn interaction_lock(&self) -> Arc<Mutex<()>> {
+        // This lock serializes process I/O and pruning only. Event publication is coordinated
+        // exclusively through `event_publication_semaphore`.
         Arc::clone(&self.interaction_lock)
     }
 
