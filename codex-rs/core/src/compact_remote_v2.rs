@@ -245,8 +245,8 @@ async fn run_remote_compact_task_inner_impl(
         analytics_details,
     )
     .await;
-    let (attempt, compaction_turn_context) = match attempt {
-        Ok(attempt) => (attempt, turn_context),
+    let (attempt, compaction_step_context) = match attempt {
+        Ok(attempt) => (attempt, step_context),
         Err(error) => {
             if remote_compact_error_is_context_overflow(&error) {
                 return recover_from_remote_compact_context_overflow(
@@ -290,11 +290,12 @@ async fn run_remote_compact_task_inner_impl(
                 fallback_result.as_ref().err(),
             );
             match fallback_result {
-                Ok(attempt) => (attempt, fallback_turn_context),
+                Ok(attempt) => (attempt, fallback_step_context),
                 Err(_) => return Err(error),
             }
         }
     };
+    let compaction_turn_context = &compaction_step_context.turn;
     let RemoteCompactV2Attempt {
         trace_input_history,
         prompt_input,
@@ -326,6 +327,10 @@ async fn run_remote_compact_task_inner_impl(
     let estimated_tokens = estimate_compacted_history_tokens(
         new_history.iter().map(|envelope| &envelope.item),
         base_instructions.text.as_str(),
+        compaction_step_context
+            .tool_router
+            .model_visible_specs()
+            .as_ref(),
     );
     if let Some((context_window, required_headroom)) = insufficient_post_compaction_headroom(
         estimated_tokens,
@@ -933,6 +938,19 @@ mod tests {
             None
         );
         assert_eq!(insufficient_post_compaction_headroom(1, None), None);
+    }
+
+    #[test]
+    fn compacted_history_estimate_reserves_request_and_tool_overhead() {
+        let without_tools =
+            estimate_compacted_history_tokens(std::iter::empty::<&ResponseItem>(), "", &[]);
+        let tool =
+            crate::tools::handlers::get_context_remaining_spec::create_get_context_remaining_tool();
+        let with_tools =
+            estimate_compacted_history_tokens(std::iter::empty::<&ResponseItem>(), "", &[tool]);
+
+        assert!(without_tools >= crate::compact_remote::POST_COMPACTION_REQUEST_ENVELOPE_TOKENS);
+        assert!(with_tools > without_tools);
     }
 
     #[test]

@@ -5,8 +5,6 @@ use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 use std::time::Instant;
 
-use sha1::Digest;
-use sha1::Sha1;
 use tokio::sync::RwLock;
 use tokio::task::JoinError;
 use tokio_util::either::Either;
@@ -249,20 +247,17 @@ pub(crate) async fn repeated_malformed_function_call_error(
         arguments,
         call_id,
     ) + 1;
-    let fingerprint = format!("{:x}", Sha1::digest(arguments.as_bytes()));
-    let fingerprint = &fingerprint[..12];
     tracing::warn!(
         tool_name = %tool_name,
         call_id,
         argument_bytes = arguments.len(),
-        argument_fingerprint = fingerprint,
         identical_attempts = attempts,
         "model emitted malformed function arguments"
     );
     (attempts >= MAX_IDENTICAL_MALFORMED_TOOL_CALLS).then(|| {
         CodexErr::InvalidRequest(format!(
             "model repeatedly emitted identical malformed arguments for tool {tool_name} \
-             ({attempts} attempts, {} bytes, fingerprint {fingerprint})",
+             ({attempts} attempts, {} bytes)",
             arguments.len(),
         ))
     })

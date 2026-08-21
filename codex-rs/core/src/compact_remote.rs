@@ -40,6 +40,7 @@ use codex_protocol::models::ResponseItem;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::TurnStartedEvent;
 use codex_rollout_trace::CompactionCheckpointTracePayload;
+use codex_tools::ToolSpec;
 use codex_utils_output_truncation::approx_token_count;
 use tokio_util::sync::CancellationToken;
 use tracing::warn;
@@ -52,6 +53,7 @@ use request::run_remote_compact_attempt;
 const CONTEXT_WINDOW_TRUNCATED_OUTPUT_MESSAGE: &str =
     "Output exceeded the available model context and was truncated";
 const MAX_REQUIRED_POST_COMPACTION_HEADROOM_TOKENS: i64 = 64_000;
+pub(crate) const POST_COMPACTION_REQUEST_ENVELOPE_TOKENS: i64 = 8_192;
 
 pub(crate) fn remote_compact_error_is_context_overflow(error: &CodexErr) -> bool {
     if matches!(error.details(), CodexErrorDetails::ContextWindowExceeded) {
@@ -254,8 +256,8 @@ async fn run_remote_compact_task_inner_impl(
         analytics_details,
     )
     .await;
-    let (attempt, compaction_turn_context) = match attempt {
-        Ok(attempt) => (attempt, turn_context),
+    let (attempt, compaction_step_context) = match attempt {
+        Ok(attempt) => (attempt, step_context),
         Err(error) => {
             if remote_compact_error_is_context_overflow(&error) {
                 return recover_from_remote_compact_context_overflow(
@@ -299,11 +301,12 @@ async fn run_remote_compact_task_inner_impl(
                 fallback_result.as_ref().err(),
             );
             match fallback_result {
-                Ok(attempt) => (attempt, fallback_turn_context),
+                Ok(attempt) => (attempt, fallback_step_context),
                 Err(_) => return Err(error),
             }
         }
     };
+    let compaction_turn_context = &compaction_step_context.turn;
     let RemoteCompactAttempt {
         new_history,
         trace_input_history,
@@ -312,8 +315,14 @@ async fn run_remote_compact_task_inner_impl(
     let (new_history, world_state_baseline) =
         process_compacted_history(sess.as_ref(), new_history, &initial_context_injection).await;
     let base_instructions = sess.get_base_instructions().await;
-    let estimated_tokens =
-        estimate_compacted_history_tokens(new_history.iter(), base_instructions.text.as_str());
+    let estimated_tokens = estimate_compacted_history_tokens(
+        new_history.iter(),
+        base_instructions.text.as_str(),
+        compaction_step_context
+            .tool_router
+            .model_visible_specs()
+            .as_ref(),
+    );
     if let Some((context_window, required_headroom)) = insufficient_post_compaction_headroom(
         estimated_tokens,
         compaction_turn_context.model_context_window(),
@@ -391,12 +400,18 @@ async fn run_remote_compact_task_inner_impl(
 pub(crate) fn estimate_compacted_history_tokens<'a>(
     history: impl IntoIterator<Item = &'a ResponseItem>,
     base_instructions: &str,
+    tools: &[ToolSpec],
 ) -> i64 {
     let base_tokens = i64::try_from(approx_token_count(base_instructions)).unwrap_or(i64::MAX);
+    let tool_tokens = serde_json::to_string(tools)
+        .map(|tools| i64::try_from(approx_token_count(&tools)).unwrap_or(i64::MAX))
+        .unwrap_or(i64::MAX);
     history
         .into_iter()
         .map(estimate_item_token_count)
         .fold(base_tokens, i64::saturating_add)
+        .saturating_add(tool_tokens)
+        .saturating_add(POST_COMPACTION_REQUEST_ENVELOPE_TOKENS)
 }
 
 pub(crate) fn insufficient_post_compaction_headroom(
