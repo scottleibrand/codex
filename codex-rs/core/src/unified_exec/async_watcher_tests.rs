@@ -207,6 +207,58 @@ async fn exit_watcher_waits_for_late_network_denial_before_classifying_end() -> 
     Ok(())
 }
 
+#[tokio::test]
+async fn exit_watcher_bounds_interaction_lock_wait_after_exit() -> anyhow::Result<()> {
+    let StreamingOutputHarness {
+        process,
+        stdout_tx,
+        exit_tx,
+        transcript,
+        context,
+        rx_event,
+    } = streaming_output_harness().await?;
+    let interaction_guard = process.interaction_lock().lock_owned().await;
+
+    tokio::time::pause();
+    #[allow(deprecated)]
+    let cwd = context.step_context.turn.cwd.clone().into();
+    spawn_exit_watcher(
+        Arc::clone(&process),
+        Arc::clone(&context.session),
+        Arc::clone(&context.step_context.turn),
+        context.call_id,
+        vec!["proof".to_string()],
+        cwd,
+        /*process_id*/ 123,
+        /*plugin_attribution*/ None,
+        transcript,
+        Instant::now(),
+        /*network_denial_monitor*/ None,
+        /*plugin_metrics_sidecar*/ None,
+    );
+
+    exit_tx.send(0).expect("send exit");
+    drop(stdout_tx);
+
+    let event = tokio::time::timeout(Duration::from_secs(6), rx_event.recv())
+        .await
+        .expect("exited commands must emit a terminal event")
+        .expect("command end event");
+    tokio::time::resume();
+    drop(interaction_guard);
+
+    let EventMsg::ItemCompleted(completed) = event.msg else {
+        panic!("expected ItemCompleted");
+    };
+    let TurnItem::CommandExecution(item) = completed.item else {
+        panic!("expected CommandExecution");
+    };
+    assert_eq!(item.status, CommandExecutionStatus::Completed);
+    assert_eq!(item.exit_code, Some(0));
+
+    Ok(())
+}
+
 #[test]
 fn split_valid_utf8_prefix_respects_max_bytes_for_ascii() {
     let mut buf = VecDeque::from(b"hello word!".to_vec());
