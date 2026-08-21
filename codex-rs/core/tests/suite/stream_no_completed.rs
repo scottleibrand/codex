@@ -382,6 +382,97 @@ async fn sampling_deadline_retries_then_completes() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn sampling_deadline_resets_after_each_provider_event() {
+    skip_if_no_network!();
+
+    let (created_tx, created_rx) = oneshot::channel::<()>();
+    let (message_tx, message_rx) = oneshot::channel::<()>();
+    let (completed_tx, completed_rx) = oneshot::channel::<()>();
+    let delayed_stream = vec![
+        StreamingSseChunk {
+            gate: Some(created_rx),
+            body: responses::sse(vec![responses::ev_response_created("resp-progress")]),
+        },
+        StreamingSseChunk {
+            gate: Some(message_rx),
+            body: responses::sse(vec![responses::ev_assistant_message(
+                "msg-progress",
+                "still working",
+            )]),
+        },
+        StreamingSseChunk {
+            gate: Some(completed_rx),
+            body: responses::sse(vec![responses::ev_completed("resp-progress")]),
+        },
+    ];
+    let (server, _) = start_streaming_sse_server(vec![delayed_stream]).await;
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let _ = created_tx.send(());
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let _ = message_tx.send(());
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let _ = completed_tx.send(());
+    });
+
+    let model_provider = ModelProviderInfo {
+        name: "Amazon Bedrock".into(),
+        base_url: Some(format!("{}/v1", server.uri())),
+        env_key: Some("PATH".into()),
+        env_key_instructions: None,
+        experimental_bearer_token: None,
+        auth: None,
+        aws: None,
+        wire_api: WireApi::Responses,
+        query_params: None,
+        http_headers: None,
+        env_http_headers: None,
+        request_max_retries: Some(0),
+        stream_max_retries: Some(0),
+        stream_idle_timeout_ms: Some(2_000),
+        stream_setup_timeout_ms: Some(2_000),
+        sampling_timeout_ms: Some(150),
+        websocket_connect_timeout_ms: None,
+        requires_openai_auth: false,
+        supports_websockets: false,
+        supports_standalone_web_search: false,
+    };
+
+    let TestCodex { codex, .. } = test_codex()
+        .with_config(move |config| {
+            config.model_provider = model_provider;
+        })
+        .build_with_streaming_server(&server)
+        .await
+        .unwrap();
+
+    codex
+        .start_or_steer_turn(TurnInputRequest::user_input(vec![UserInput::Text {
+            text: "hello".into(),
+            text_elements: Vec::new(),
+        }]))
+        .await
+        .unwrap();
+
+    let EventMsg::TurnComplete(completed) = tokio::time::timeout(
+        Duration::from_secs(5),
+        wait_for_event(&codex, |event| matches!(event, EventMsg::TurnComplete(_))),
+    )
+    .await
+    .expect("progress events should reset the sampling deadline") else {
+        unreachable!("predicate guarantees a turn complete event");
+    };
+    assert_eq!(completed.error, None);
+    assert_eq!(
+        server.requests().await.len(),
+        1,
+        "progress within each sampling window must not retry the model request"
+    );
+
+    server.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn sampling_deadline_stops_after_stream_retry_limit() {
     skip_if_no_network!();
 

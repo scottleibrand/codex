@@ -1360,7 +1360,7 @@ async fn run_sampling_request(
         Arc::clone(&step_context),
         Arc::clone(&turn_diff_tracker),
     );
-    let max_retries = turn_context.config.model_provider.stream_max_retries();
+    let max_retries = turn_context.provider.info().stream_max_retries();
     let mut retry_state = ResponsesStreamRetryState::default();
     let mut initial_input = Some(input);
     let mut original_input = None;
@@ -2207,7 +2207,7 @@ async fn try_run_sampling_request(
         .features
         .enabled(Feature::ConcurrentReasoningSummaries)
         && turn_context.provider.info().is_openai();
-    let stream_setup_timeout = turn_context.config.model_provider.stream_setup_timeout();
+    let stream_setup_timeout = turn_context.provider.info().stream_setup_timeout();
     let mut stream = match tokio::time::timeout(
         stream_setup_timeout,
         client_session
@@ -2236,10 +2236,8 @@ async fn try_run_sampling_request(
             )));
         }
     };
-    let stream_idle_timeout = turn_context.config.model_provider.stream_idle_timeout();
-    let sampling_timeout = turn_context.config.model_provider.sampling_timeout();
-    let sampling_deadline =
-        sampling_timeout.map(|timeout| (tokio::time::Instant::now() + timeout, timeout));
+    let stream_idle_timeout = turn_context.provider.info().stream_idle_timeout();
+    let sampling_timeout = turn_context.provider.info().sampling_timeout();
     let mut in_flight: FuturesOrdered<BoxFuture<'static, CodexResult<ResponseInputItem>>> =
         FuturesOrdered::new();
     let mut needs_follow_up = false;
@@ -2311,15 +2309,13 @@ async fn try_run_sampling_request(
                 )),
             }
         };
-        let event = match sampling_deadline {
-            Some((deadline, timeout)) => {
-                match tokio::time::timeout_at(deadline, receive_event).await {
-                    Ok(result) => result,
-                    Err(_) => Err(CodexErr::Stream(format!(
-                        "sampling deadline exceeded after {timeout:?}"
-                    ))),
-                }
-            }
+        let event = match sampling_timeout {
+            Some(timeout) => match tokio::time::timeout(timeout, receive_event).await {
+                Ok(result) => result,
+                Err(_) => Err(CodexErr::Stream(format!(
+                    "sampling deadline exceeded after {timeout:?}"
+                ))),
+            },
             None => receive_event.await,
         };
         let event = match event {

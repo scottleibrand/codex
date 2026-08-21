@@ -2,6 +2,7 @@
 
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
+use std::sync::atomic::AtomicU8;
 use std::sync::atomic::Ordering;
 use tokio::sync::Mutex;
 use tokio::sync::Notify;
@@ -36,6 +37,9 @@ use super::head_tail_buffer::HeadTailBuffer;
 use super::process_state::ProcessState;
 
 const EARLY_EXIT_GRACE_PERIOD: Duration = Duration::from_millis(150);
+const EVENT_PUBLICATION_IDLE: u8 = 0;
+const INTERACTION_EVENT_PUBLISHING: u8 = 1;
+const TERMINAL_EVENT_CLAIMED: u8 = 2;
 pub(crate) trait SpawnLifecycle: std::fmt::Debug + Send + Sync {
     /// Returns file descriptors that must stay open across the child `exec()`.
     ///
@@ -79,6 +83,18 @@ impl Drop for OutputTaskGuard {
     }
 }
 
+pub(super) struct InteractionEventPublicationGuard {
+    state: Arc<AtomicU8>,
+    notify: Arc<Notify>,
+}
+
+impl Drop for InteractionEventPublicationGuard {
+    fn drop(&mut self) {
+        self.state.store(EVENT_PUBLICATION_IDLE, Ordering::Release);
+        self.notify.notify_waiters();
+    }
+}
+
 /// Transport-specific process handle used by unified exec.
 enum ProcessHandle {
     Local(Box<ExecCommandSession>),
@@ -93,6 +109,8 @@ pub(crate) struct UnifiedExecProcess {
     output: OutputHandles,
     output_drained: Arc<Notify>,
     interaction_lock: Arc<Mutex<()>>,
+    event_publication_state: Arc<AtomicU8>,
+    event_publication_notify: Arc<Notify>,
     state_tx: watch::Sender<ProcessState>,
     state_rx: watch::Receiver<ProcessState>,
     output_task: Option<JoinHandle<()>>,
@@ -133,6 +151,8 @@ impl UnifiedExecProcess {
             output,
             output_drained,
             interaction_lock: Arc::new(Mutex::new(())),
+            event_publication_state: Arc::new(AtomicU8::new(EVENT_PUBLICATION_IDLE)),
+            event_publication_notify: Arc::new(Notify::new()),
             state_tx,
             state_rx,
             output_task: None,
@@ -184,6 +204,48 @@ impl UnifiedExecProcess {
 
     pub(super) fn interaction_lock(&self) -> Arc<Mutex<()>> {
         Arc::clone(&self.interaction_lock)
+    }
+
+    pub(super) fn try_begin_interaction_event(&self) -> Option<InteractionEventPublicationGuard> {
+        self.event_publication_state
+            .compare_exchange(
+                EVENT_PUBLICATION_IDLE,
+                INTERACTION_EVENT_PUBLISHING,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            )
+            .ok()
+            .map(|_| InteractionEventPublicationGuard {
+                state: Arc::clone(&self.event_publication_state),
+                notify: Arc::clone(&self.event_publication_notify),
+            })
+    }
+
+    pub(super) async fn claim_terminal_event(&self) -> bool {
+        loop {
+            match self.event_publication_state.compare_exchange(
+                EVENT_PUBLICATION_IDLE,
+                TERMINAL_EVENT_CLAIMED,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => return true,
+                Err(TERMINAL_EVENT_CLAIMED) => return false,
+                Err(INTERACTION_EVENT_PUBLISHING) => {
+                    let notified = self.event_publication_notify.notified();
+                    if self.event_publication_state.load(Ordering::Acquire)
+                        != INTERACTION_EVENT_PUBLISHING
+                    {
+                        continue;
+                    }
+                    notified.await;
+                }
+                Err(state) => {
+                    tracing::error!(state, "invalid unified-exec event publication state");
+                    return false;
+                }
+            }
+        }
     }
 
     pub(super) fn has_exited(&self) -> bool {

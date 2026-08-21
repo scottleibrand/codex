@@ -911,17 +911,24 @@ impl UnifiedExecProcessManager {
         if should_emit_interaction
             && let Some(WriteStdinInteractionEvent { session, turn }) = request.interaction_event
         {
-            let interaction = TerminalInteractionEvent {
-                call_id: response.event_call_id.clone(),
-                process_id: response
-                    .process_id
-                    .unwrap_or(request.process_id)
-                    .to_string(),
-                stdin: request.input.to_string(),
-            };
-            session
-                .send_event(turn.as_ref(), EventMsg::TerminalInteraction(interaction))
-                .await;
+            if let Some(_publication_guard) = process.try_begin_interaction_event() {
+                let interaction = TerminalInteractionEvent {
+                    call_id: response.event_call_id.clone(),
+                    process_id: response
+                        .process_id
+                        .unwrap_or(request.process_id)
+                        .to_string(),
+                    stdin: request.input.to_string(),
+                };
+                session
+                    .send_event(turn.as_ref(), EventMsg::TerminalInteraction(interaction))
+                    .await;
+            } else {
+                tracing::debug!(
+                    process_id = request.process_id,
+                    "suppressing terminal interaction after terminal event was claimed"
+                );
+            }
         }
 
         Ok(response)

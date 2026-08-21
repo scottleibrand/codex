@@ -259,6 +259,58 @@ async fn exit_watcher_bounds_interaction_lock_wait_after_exit() -> anyhow::Resul
     Ok(())
 }
 
+#[tokio::test]
+async fn exit_watcher_waits_for_active_interaction_event_before_terminal_event()
+-> anyhow::Result<()> {
+    let StreamingOutputHarness {
+        process,
+        stdout_tx,
+        exit_tx,
+        transcript,
+        context,
+        rx_event,
+    } = streaming_output_harness().await?;
+    let publication_guard = process
+        .try_begin_interaction_event()
+        .expect("claim interaction event publication");
+
+    tokio::time::pause();
+    #[allow(deprecated)]
+    let cwd = context.step_context.turn.cwd.clone().into();
+    spawn_exit_watcher(
+        Arc::clone(&process),
+        Arc::clone(&context.session),
+        Arc::clone(&context.step_context.turn),
+        context.call_id,
+        vec!["proof".to_string()],
+        cwd,
+        /*process_id*/ 123,
+        /*plugin_attribution*/ None,
+        transcript,
+        Instant::now(),
+        /*network_denial_monitor*/ None,
+        /*plugin_metrics_sidecar*/ None,
+    );
+
+    exit_tx.send(0).expect("send exit");
+    drop(stdout_tx);
+    tokio::task::yield_now().await;
+    assert!(
+        rx_event.try_recv().is_err(),
+        "terminal event must not race an active interaction event"
+    );
+
+    drop(publication_guard);
+    let event = tokio::time::timeout(Duration::from_secs(1), rx_event.recv())
+        .await
+        .expect("terminal event should follow interaction publication")
+        .expect("command end event");
+    tokio::time::resume();
+
+    assert!(matches!(event.msg, EventMsg::ItemCompleted(_)));
+    Ok(())
+}
+
 #[test]
 fn split_valid_utf8_prefix_respects_max_bytes_for_ascii() {
     let mut buf = VecDeque::from(b"hello word!".to_vec());
