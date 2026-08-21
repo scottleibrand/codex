@@ -28,6 +28,7 @@ use crate::mentions::collect_explicit_app_ids;
 use crate::mentions::collect_explicit_plugin_mentions;
 use crate::mentions::collect_tool_mentions_from_messages;
 use crate::plugins::build_plugin_injections;
+use crate::responses_metadata::AutoCompactionMetadata;
 use crate::responses_metadata::CodexResponsesMetadata;
 use crate::responses_metadata::CodexResponsesRequestKind;
 use crate::responses_retry::ResponsesStreamRequest;
@@ -122,6 +123,7 @@ use codex_utils_stream_parser::AssistantTextStreamParser;
 use codex_utils_stream_parser::ProposedPlanSegment;
 use codex_utils_stream_parser::extract_proposed_plan_text;
 use codex_utils_stream_parser::strip_citations;
+use codex_utils_string::approx_token_count;
 use futures::future::BoxFuture;
 use futures::prelude::*;
 use futures::stream::FuturesOrdered;
@@ -163,6 +165,7 @@ pub(crate) async fn run_turn(
 
     let mut client_session =
         prewarmed_client_session.unwrap_or_else(|| sess.services.model_client.new_session());
+    let post_compaction_input_tokens = estimate_turn_input_tokens(&input);
     // TODO(ccunningham): Pre-turn compaction runs before context updates and the
     // new user message are recorded. Estimate pending incoming items (context
     // diffs/full reinjection + user input) and trigger compaction preemptively
@@ -172,6 +175,7 @@ pub(crate) async fn run_turn(
         &turn_context,
         &mut client_session,
         &cancellation_token,
+        post_compaction_input_tokens,
     )
     .await
     {
@@ -478,8 +482,11 @@ pub(crate) async fn run_turn(
                             world_state: Arc::clone(&world_state),
                             step_context: Arc::clone(&step_context),
                         },
-                        CompactionReason::ContextLimit,
-                        CompactionPhase::MidTurn,
+                        AutoCompactionMetadata::new(
+                            CompactionReason::ContextLimit,
+                            CompactionPhase::MidTurn,
+                            /*post_compaction_input_tokens*/ 0,
+                        ),
                     )
                     .await
                     {
@@ -653,6 +660,22 @@ fn turn_user_input(input: &[TurnInput]) -> Vec<UserInput> {
         .flatten()
         .cloned()
         .collect()
+}
+
+fn estimate_turn_input_tokens(input: &[TurnInput]) -> i64 {
+    const TURN_INPUT_SERIALIZATION_FALLBACK_TOKENS: i64 = 16_384;
+    match serde_json::to_string(input) {
+        Ok(serialized) => i64::try_from(approx_token_count(&serialized))
+            .unwrap_or(TURN_INPUT_SERIALIZATION_FALLBACK_TOKENS),
+        Err(error) => {
+            warn!(
+                %error,
+                fallback_tokens = TURN_INPUT_SERIALIZATION_FALLBACK_TOKENS,
+                "failed to serialize pending turn input for post-compaction headroom"
+            );
+            TURN_INPUT_SERIALIZATION_FALLBACK_TOKENS
+        }
+    }
 }
 
 async fn required_mcp_servers_for_input(
@@ -1015,9 +1038,16 @@ async fn run_pre_sampling_compact(
     turn_context: &Arc<TurnContext>,
     client_session: &mut ModelClientSession,
     cancellation_token: &CancellationToken,
+    post_compaction_input_tokens: i64,
 ) -> CodexResult<()> {
-    maybe_run_previous_model_inline_compact(sess, turn_context, client_session, cancellation_token)
-        .await?;
+    maybe_run_previous_model_inline_compact(
+        sess,
+        turn_context,
+        client_session,
+        cancellation_token,
+        post_compaction_input_tokens,
+    )
+    .await?;
     let token_status =
         super::context_window::context_window_token_status(sess.as_ref(), turn_context.as_ref())
             .await;
@@ -1033,8 +1063,11 @@ async fn run_pre_sampling_compact(
             /*fallback_step_context*/ None,
             client_session,
             InitialContextInjection::DoNotInject,
-            CompactionReason::ContextLimit,
-            CompactionPhase::PreTurn,
+            AutoCompactionMetadata::new(
+                CompactionReason::ContextLimit,
+                CompactionPhase::PreTurn,
+                post_compaction_input_tokens,
+            ),
         )
         .await?;
     }
@@ -1083,6 +1116,7 @@ async fn maybe_run_previous_model_inline_compact(
     turn_context: &Arc<TurnContext>,
     client_session: &mut ModelClientSession,
     cancellation_token: &CancellationToken,
+    post_compaction_input_tokens: i64,
 ) -> CodexResult<()> {
     let Some(previous_turn_settings) = sess.previous_turn_settings().await else {
         return Ok(());
@@ -1115,8 +1149,11 @@ async fn maybe_run_previous_model_inline_compact(
             fallback_step_context,
             client_session,
             InitialContextInjection::DoNotInject,
-            CompactionReason::CompHashChanged,
-            CompactionPhase::PreTurn,
+            AutoCompactionMetadata::new(
+                CompactionReason::CompHashChanged,
+                CompactionPhase::PreTurn,
+                post_compaction_input_tokens,
+            ),
         )
         .await?;
         return Ok(());
@@ -1163,8 +1200,11 @@ async fn maybe_run_previous_model_inline_compact(
             fallback_step_context,
             client_session,
             InitialContextInjection::DoNotInject,
-            CompactionReason::ModelDownshift,
-            CompactionPhase::PreTurn,
+            AutoCompactionMetadata::new(
+                CompactionReason::ModelDownshift,
+                CompactionPhase::PreTurn,
+                post_compaction_input_tokens,
+            ),
         )
         .await?;
     }
@@ -1174,7 +1214,10 @@ async fn maybe_run_previous_model_inline_compact(
 #[instrument(
     level = "trace",
     skip_all,
-    fields(reason = ?reason, phase = ?phase)
+    fields(
+        reason = ?compaction_metadata.reason(),
+        phase = ?compaction_metadata.phase()
+    )
 )]
 async fn run_auto_compact(
     sess: &Arc<Session>,
@@ -1182,8 +1225,7 @@ async fn run_auto_compact(
     fallback_step_context: Option<Arc<StepContext>>,
     client_session: &mut ModelClientSession,
     initial_context_injection: InitialContextInjection,
-    reason: CompactionReason,
-    phase: CompactionPhase,
+    compaction_metadata: AutoCompactionMetadata,
 ) -> CodexResult<()> {
     let turn_context = &step_context.turn;
     let _profile_guard = turn_context.turn_timing_state.begin_compaction();
@@ -1217,8 +1259,7 @@ async fn run_auto_compact(
                 fallback_step_context,
                 client_session,
                 initial_context_injection,
-                reason,
-                phase,
+                compaction_metadata,
             )
             .await?;
         }
@@ -1234,8 +1275,7 @@ async fn run_auto_compact(
                 fallback_step_context,
                 client_session.turn_state(),
                 initial_context_injection,
-                reason,
-                phase,
+                compaction_metadata,
             )
             .await?;
         }
@@ -1249,8 +1289,8 @@ async fn run_auto_compact(
                 Arc::clone(sess),
                 Arc::clone(turn_context),
                 initial_context_injection,
-                reason,
-                phase,
+                compaction_metadata.reason(),
+                compaction_metadata.phase(),
             )
             .await?;
         }

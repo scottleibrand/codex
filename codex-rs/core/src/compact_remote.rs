@@ -19,6 +19,7 @@ use crate::hook_runtime::PostCompactHookOutcome;
 use crate::hook_runtime::PreCompactHookOutcome;
 use crate::hook_runtime::run_post_compact_hooks;
 use crate::hook_runtime::run_pre_compact_hooks;
+use crate::responses_metadata::AutoCompactionMetadata;
 use crate::responses_metadata::CompactionTurnMetadata;
 use crate::session::session::Session;
 use crate::session::step_context::StepContext;
@@ -92,15 +93,10 @@ pub(crate) async fn run_inline_remote_auto_compact_task(
     fallback_step_context: Option<Arc<StepContext>>,
     turn_state: Arc<OnceLock<String>>,
     initial_context_injection: InitialContextInjection,
-    reason: CompactionReason,
-    phase: CompactionPhase,
+    auto_compaction_metadata: AutoCompactionMetadata,
 ) -> CodexResult<()> {
-    let compaction_metadata = CompactionTurnMetadata::new(
-        CompactionTrigger::Auto,
-        reason,
-        CompactionImplementation::ResponsesCompact,
-        phase,
-    );
+    let compaction_metadata =
+        auto_compaction_metadata.into_turn_metadata(CompactionImplementation::ResponsesCompact);
     run_remote_compact_task_inner(
         &sess,
         &step_context,
@@ -323,7 +319,8 @@ async fn run_remote_compact_task_inner_impl(
             .tool_router
             .model_visible_specs()
             .as_ref(),
-    );
+    )
+    .saturating_add(compaction_metadata.post_compaction_input_tokens());
     if let Some((context_window, required_headroom)) = insufficient_post_compaction_headroom(
         estimated_tokens,
         compaction_turn_context.model_context_window(),
