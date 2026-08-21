@@ -429,6 +429,9 @@ pub(crate) fn insufficient_post_compaction_headroom(
     context_window: Option<i64>,
 ) -> Option<(i64, i64)> {
     let context_window = context_window?;
+    if context_window <= 0 {
+        return Some((context_window, 0));
+    }
     let required_headroom =
         (context_window / 4).clamp(1, MAX_REQUIRED_POST_COMPACTION_HEADROOM_TOKENS);
     (estimated_tokens > context_window.saturating_sub(required_headroom))

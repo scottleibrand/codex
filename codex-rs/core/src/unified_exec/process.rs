@@ -3,10 +3,10 @@
 use std::future::Future;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
-use std::sync::atomic::AtomicU8;
 use std::sync::atomic::Ordering;
 use tokio::sync::Mutex;
 use tokio::sync::Notify;
+use tokio::sync::Semaphore;
 use tokio::sync::broadcast;
 use tokio::sync::oneshot::error::TryRecvError;
 use tokio::sync::watch;
@@ -39,10 +39,6 @@ use super::process_state::ProcessState;
 
 const EARLY_EXIT_GRACE_PERIOD: Duration = Duration::from_millis(150);
 const INTERACTION_EVENT_PUBLICATION_TIMEOUT: Duration = Duration::from_secs(5);
-const TERMINAL_EVENT_CLAIM_GRACE_PERIOD: Duration = Duration::from_secs(1);
-const EVENT_PUBLICATION_IDLE: u8 = 0;
-const INTERACTION_EVENT_PUBLISHING: u8 = 1;
-const TERMINAL_EVENT_CLAIMED: u8 = 2;
 pub(crate) trait SpawnLifecycle: std::fmt::Debug + Send + Sync {
     /// Returns file descriptors that must stay open across the child `exec()`.
     ///
@@ -86,23 +82,6 @@ impl Drop for OutputTaskGuard {
     }
 }
 
-pub(super) struct InteractionEventPublicationGuard {
-    state: Arc<AtomicU8>,
-    notify: Arc<Notify>,
-}
-
-impl Drop for InteractionEventPublicationGuard {
-    fn drop(&mut self) {
-        let _ = self.state.compare_exchange(
-            INTERACTION_EVENT_PUBLISHING,
-            EVENT_PUBLICATION_IDLE,
-            Ordering::AcqRel,
-            Ordering::Acquire,
-        );
-        self.notify.notify_waiters();
-    }
-}
-
 /// Transport-specific process handle used by unified exec.
 enum ProcessHandle {
     Local(Box<ExecCommandSession>),
@@ -117,8 +96,8 @@ pub(crate) struct UnifiedExecProcess {
     output: OutputHandles,
     output_drained: Arc<Notify>,
     interaction_lock: Arc<Mutex<()>>,
-    event_publication_state: Arc<AtomicU8>,
-    event_publication_notify: Arc<Notify>,
+    event_publication_semaphore: Arc<Semaphore>,
+    terminal_event_claimed: AtomicBool,
     state_tx: watch::Sender<ProcessState>,
     state_rx: watch::Receiver<ProcessState>,
     output_task: Option<JoinHandle<()>>,
@@ -159,8 +138,8 @@ impl UnifiedExecProcess {
             output,
             output_drained,
             interaction_lock: Arc::new(Mutex::new(())),
-            event_publication_state: Arc::new(AtomicU8::new(EVENT_PUBLICATION_IDLE)),
-            event_publication_notify: Arc::new(Notify::new()),
+            event_publication_semaphore: Arc::new(Semaphore::new(1)),
+            terminal_event_claimed: AtomicBool::new(false),
             state_tx,
             state_rx,
             output_task: None,
@@ -214,33 +193,16 @@ impl UnifiedExecProcess {
         Arc::clone(&self.interaction_lock)
     }
 
-    fn begin_interaction_event(&self) -> Option<InteractionEventPublicationGuard> {
-        self.event_publication_state
-            .compare_exchange(
-                EVENT_PUBLICATION_IDLE,
-                INTERACTION_EVENT_PUBLISHING,
-                Ordering::AcqRel,
-                Ordering::Acquire,
-            )
-            .ok()
-            .map(|_| InteractionEventPublicationGuard {
-                state: Arc::clone(&self.event_publication_state),
-                notify: Arc::clone(&self.event_publication_notify),
-            })
-    }
-
-    #[cfg(test)]
-    pub(super) fn try_begin_interaction_event(&self) -> Option<InteractionEventPublicationGuard> {
-        self.begin_interaction_event()
-    }
-
     pub(super) async fn publish_interaction_event<F>(&self, event: F) -> bool
     where
         F: Future<Output = ()>,
     {
-        let Some(_publication_guard) = self.begin_interaction_event() else {
+        let Ok(_publication_permit) = self.event_publication_semaphore.acquire().await else {
             return false;
         };
+        if self.terminal_event_claimed.load(Ordering::Acquire) {
+            return false;
+        }
         if tokio::time::timeout(INTERACTION_EVENT_PUBLICATION_TIMEOUT, event)
             .await
             .is_err()
@@ -251,62 +213,10 @@ impl UnifiedExecProcess {
     }
 
     pub(super) async fn claim_terminal_event(&self) -> bool {
-        loop {
-            match self.event_publication_state.compare_exchange(
-                EVENT_PUBLICATION_IDLE,
-                TERMINAL_EVENT_CLAIMED,
-                Ordering::AcqRel,
-                Ordering::Acquire,
-            ) {
-                Ok(_) => return true,
-                Err(TERMINAL_EVENT_CLAIMED) => return false,
-                Err(INTERACTION_EVENT_PUBLISHING) => {
-                    let mut notified = std::pin::pin!(self.event_publication_notify.notified());
-                    notified.as_mut().enable();
-                    if self.event_publication_state.load(Ordering::Acquire)
-                        != INTERACTION_EVENT_PUBLISHING
-                    {
-                        continue;
-                    }
-                    if tokio::time::timeout(
-                        INTERACTION_EVENT_PUBLICATION_TIMEOUT
-                            .saturating_add(TERMINAL_EVENT_CLAIM_GRACE_PERIOD),
-                        notified,
-                    )
-                    .await
-                    .is_err()
-                    {
-                        match self.event_publication_state.compare_exchange(
-                            INTERACTION_EVENT_PUBLISHING,
-                            TERMINAL_EVENT_CLAIMED,
-                            Ordering::AcqRel,
-                            Ordering::Acquire,
-                        ) {
-                            Ok(_) => {
-                                tracing::warn!(
-                                    "interaction event publication exceeded its bounded lifetime; \
-                                     claiming terminal event"
-                                );
-                                return true;
-                            }
-                            Err(TERMINAL_EVENT_CLAIMED) => return false,
-                            Err(EVENT_PUBLICATION_IDLE) => continue,
-                            Err(state) => {
-                                tracing::error!(
-                                    state,
-                                    "invalid unified-exec event publication state"
-                                );
-                                return false;
-                            }
-                        }
-                    }
-                }
-                Err(state) => {
-                    tracing::error!(state, "invalid unified-exec event publication state");
-                    return false;
-                }
-            }
-        }
+        let Ok(_publication_permit) = self.event_publication_semaphore.acquire().await else {
+            return false;
+        };
+        !self.terminal_event_claimed.swap(true, Ordering::AcqRel)
     }
 
     pub(super) fn has_exited(&self) -> bool {

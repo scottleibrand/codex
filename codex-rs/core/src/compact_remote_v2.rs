@@ -940,6 +940,14 @@ mod tests {
             None
         );
         assert_eq!(insufficient_post_compaction_headroom(1, None), None);
+        assert_eq!(
+            insufficient_post_compaction_headroom(0, Some(0)),
+            Some((0, 0))
+        );
+        assert_eq!(
+            insufficient_post_compaction_headroom(0, Some(-1)),
+            Some((-1, 0))
+        );
     }
 
     #[test]
