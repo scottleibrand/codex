@@ -2,14 +2,30 @@ use super::*;
 
 #[test]
 fn stream_setup_timeout_defaults_only_for_bedrock() {
-    let bedrock = built_in_model_providers(None)[AMAZON_BEDROCK_PROVIDER_ID].clone();
+    let mut bedrock = built_in_model_providers(None)[AMAZON_BEDROCK_PROVIDER_ID].clone();
     assert_eq!(
         bedrock.stream_setup_timeout(),
         Some(Duration::from_millis(DEFAULT_STREAM_SETUP_TIMEOUT_MS))
     );
+    assert_eq!(
+        bedrock.sampling_timeout(),
+        Some(Duration::from_millis(DEFAULT_BEDROCK_SAMPLING_TIMEOUT_MS))
+    );
 
     let openai = ModelProviderInfo::create_openai_provider(None);
     assert_eq!(openai.stream_setup_timeout(), None);
+    assert_eq!(openai.sampling_timeout(), None);
+
+    bedrock.stream_setup_timeout_ms = Some(1_234);
+    bedrock.sampling_timeout_ms = Some(5_678);
+    assert_eq!(
+        bedrock.stream_setup_timeout(),
+        Some(Duration::from_millis(1_234))
+    );
+    assert_eq!(
+        bedrock.sampling_timeout(),
+        Some(Duration::from_millis(5_678))
+    );
 }
 use codex_utils_absolute_path::AbsolutePathBuf;
 use codex_utils_absolute_path::AbsolutePathBufGuard;
