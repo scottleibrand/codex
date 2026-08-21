@@ -176,7 +176,6 @@ pub(crate) fn spawn_exit_watcher(
 ) {
     let exit_token = process.cancellation_token();
     let output_drained = process.output_drained_notify();
-    let interaction_lock = process.interaction_lock();
 
     tokio::spawn(async move {
         exit_token.cancelled().await;
@@ -213,23 +212,6 @@ pub(crate) fn spawn_exit_watcher(
             );
             network_denial_monitor.abort();
         }
-        let interaction_guard = match tokio::time::timeout(
-            TERMINAL_EVENT_FINALIZATION_TIMEOUT,
-            interaction_lock.lock_owned(),
-        )
-        .await
-        {
-            Ok(guard) => Some(guard),
-            Err(_) => {
-                tracing::warn!(
-                    call_id,
-                    process_id,
-                    stage = "interaction_lock",
-                    "timed out finalizing exited command; claiming terminal event"
-                );
-                None
-            }
-        };
         // The only production interaction publisher has its send bounded, so this wait preserves
         // event order and still guarantees eventual terminal publication.
         let terminal_claimed = process.claim_terminal_event().await;
@@ -283,7 +265,6 @@ pub(crate) fn spawn_exit_watcher(
             )
             .await;
         }
-        drop(interaction_guard);
     });
 }
 
