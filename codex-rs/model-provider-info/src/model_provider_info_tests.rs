@@ -1,4 +1,16 @@
 use super::*;
+
+#[test]
+fn stream_setup_timeout_defaults_only_for_bedrock() {
+    let bedrock = built_in_model_providers(None)[AMAZON_BEDROCK_PROVIDER_ID].clone();
+    assert_eq!(
+        bedrock.stream_setup_timeout(),
+        Some(Duration::from_millis(DEFAULT_STREAM_SETUP_TIMEOUT_MS))
+    );
+
+    let openai = ModelProviderInfo::create_openai_provider(None);
+    assert_eq!(openai.stream_setup_timeout(), None);
+}
 use codex_utils_absolute_path::AbsolutePathBuf;
 use codex_utils_absolute_path::AbsolutePathBufGuard;
 use pretty_assertions::assert_eq;

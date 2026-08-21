@@ -89,30 +89,19 @@ impl ToolCallRuntime {
                 Ok(response) => Ok(response.into_response()),
                 Err(FunctionCallError::Fatal(message)) => Err(CodexErr::Fatal(message)),
                 Err(FunctionCallError::MalformedArguments(message)) => {
-                    let occurrences =
-                        identical_function_call_count(error_session.as_ref(), &error_call).await;
                     let arguments = match &error_call.payload {
                         ToolPayload::Function { arguments } => arguments.as_str(),
                         _ => "",
                     };
-                    let fingerprint = format!("{:x}", Sha1::digest(arguments.as_bytes()));
-                    let fingerprint = &fingerprint[..12];
-                    tracing::warn!(
-                        tool_name = %error_call.tool_name,
-                        call_id = %error_call.call_id,
-                        argument_bytes = arguments.len(),
-                        argument_fingerprint = fingerprint,
-                        identical_occurrences = occurrences,
-                        "model emitted malformed function arguments"
-                    );
-                    if occurrences >= MAX_IDENTICAL_MALFORMED_TOOL_CALLS {
-                        Err(CodexErr::Fatal(format!(
-                            "model repeatedly emitted identical malformed arguments for tool {} \
-                             ({} attempts, {} bytes, fingerprint {fingerprint})",
-                            error_call.tool_name,
-                            occurrences,
-                            arguments.len(),
-                        )))
+                    if let Some(err) = repeated_malformed_function_call_error(
+                        error_session.as_ref(),
+                        &error_call.tool_name,
+                        arguments,
+                        &error_call.call_id,
+                    )
+                    .await
+                    {
+                        Err(err)
                     } else {
                         Ok(Self::failure_response(
                             error_call,
@@ -246,18 +235,44 @@ impl ToolCallRuntime {
     }
 }
 
-async fn identical_function_call_count(session: &Session, call: &ToolCall) -> usize {
+pub(crate) async fn repeated_malformed_function_call_error(
+    session: &Session,
+    tool_name: &codex_tools::ToolName,
+    arguments: &str,
+    call_id: &str,
+) -> Option<CodexErr> {
     let history = session.clone_history().await;
-    identical_function_call_count_in_items(history.raw_items(), call)
+    let attempts = identical_prior_function_call_count_in_items(
+        history.raw_items(),
+        tool_name,
+        arguments,
+        call_id,
+    ) + 1;
+    let fingerprint = format!("{:x}", Sha1::digest(arguments.as_bytes()));
+    let fingerprint = &fingerprint[..12];
+    tracing::warn!(
+        tool_name = %tool_name,
+        call_id,
+        argument_bytes = arguments.len(),
+        argument_fingerprint = fingerprint,
+        identical_attempts = attempts,
+        "model emitted malformed function arguments"
+    );
+    (attempts >= MAX_IDENTICAL_MALFORMED_TOOL_CALLS).then(|| {
+        CodexErr::InvalidRequest(format!(
+            "model repeatedly emitted identical malformed arguments for tool {tool_name} \
+             ({attempts} attempts, {} bytes, fingerprint {fingerprint})",
+            arguments.len(),
+        ))
+    })
 }
 
-fn identical_function_call_count_in_items<'a>(
+fn identical_prior_function_call_count_in_items<'a>(
     items: impl DoubleEndedIterator<Item = &'a ResponseItem>,
-    call: &ToolCall,
+    tool_name: &codex_tools::ToolName,
+    arguments: &str,
+    call_id: &str,
 ) -> usize {
-    let ToolPayload::Function { arguments } = &call.payload else {
-        return 0;
-    };
     items
         .rev()
         .take_while(|item| {
@@ -270,14 +285,16 @@ fn identical_function_call_count_in_items<'a>(
             matches!(
                 item,
                 ResponseItem::FunctionCall {
+                    call_id: candidate_call_id,
                     name,
                     namespace,
                     arguments: candidate_arguments,
                     ..
                 } if codex_tools::ToolName::new(namespace.clone(), name)
                     .with_default_namespace()
-                    == call.tool_name
+                    == *tool_name
                     && candidate_arguments == arguments
+                    && candidate_call_id != call_id
             )
         })
         .count()
@@ -487,6 +504,18 @@ mod tests {
         }
     }
 
+    fn malformed_attempt_count(items: &[ResponseItem], call: &ToolCall) -> usize {
+        let ToolPayload::Function { arguments } = &call.payload else {
+            panic!("expected function payload");
+        };
+        identical_prior_function_call_count_in_items(
+            items.iter(),
+            &call.tool_name,
+            arguments,
+            &call.call_id,
+        ) + 1
+    }
+
     #[test]
     fn identical_malformed_calls_count_across_tool_outputs() {
         let arguments = r#"{"targets":["agent-1"]} trailing"#;
@@ -498,8 +527,10 @@ mod tests {
             function_call("wait_agent", arguments, "call-3"),
         ];
 
+        let mut call = wait_call(arguments);
+        call.call_id = "call-3".to_string();
         assert_eq!(
-            identical_function_call_count_in_items(items.iter(), &wait_call(arguments)),
+            malformed_attempt_count(&items, &call),
             MAX_IDENTICAL_MALFORMED_TOOL_CALLS
         );
     }
@@ -519,10 +550,7 @@ mod tests {
             ),
         ];
 
-        assert_eq!(
-            identical_function_call_count_in_items(items.iter(), &wait_call(arguments)),
-            1
-        );
+        assert_eq!(malformed_attempt_count(&items, &wait_call(arguments)), 2);
     }
 
     #[test]
@@ -535,10 +563,7 @@ mod tests {
             function_call("wait_agent", arguments, "current-call"),
         ];
 
-        assert_eq!(
-            identical_function_call_count_in_items(items.iter(), &wait_call(arguments)),
-            1
-        );
+        assert_eq!(malformed_attempt_count(&items, &wait_call(arguments)), 1);
     }
 
     #[tokio::test]
@@ -553,7 +578,6 @@ mod tests {
                     function_output("call-1"),
                     function_call("wait_agent", arguments, "call-2"),
                     function_output("call-2"),
-                    function_call("wait_agent", arguments, "call-3"),
                 ],
             )
             .await;
@@ -577,8 +601,12 @@ mod tests {
             .await
             .expect_err("third identical malformed call should fail closed");
 
-        let codex_protocol::error::CodexErrorDetails::Fatal(message) = err.details() else {
-            panic!("expected fatal malformed-call error, got {}", err.details());
+        let codex_protocol::error::CodexErrorDetails::InvalidRequest(message) = err.details()
+        else {
+            panic!(
+                "expected invalid-request malformed-call error, got {}",
+                err.details()
+            );
         };
         assert!(message.contains("3 attempts"));
         assert!(message.contains("wait_agent"));

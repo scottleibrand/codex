@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::collections::HashSet;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
+use std::time::Instant;
 
 use crate::client::ModelClientSession;
 use crate::client_common::Prompt;
@@ -2207,37 +2208,39 @@ async fn try_run_sampling_request(
         .features
         .enabled(Feature::ConcurrentReasoningSummaries)
         && turn_context.provider.info().is_openai();
-    let stream_setup_timeout = turn_context.provider.info().stream_setup_timeout();
-    let mut stream = match tokio::time::timeout(
-        stream_setup_timeout,
-        client_session
-            .stream(
-                prompt,
-                &step_context.model_info,
-                &step_context.session_telemetry,
-                step_context.reasoning_effort.clone(),
-                step_context.reasoning_summary,
-                step_context.service_tier.clone(),
-                responses_metadata,
-                &inference_trace,
-            )
-            .instrument(trace_span!("stream_request"))
-            .or_cancel(&cancellation_token),
-    )
-    .await
-    {
-        Ok(Ok(stream)) => stream?,
-        Ok(Err(codex_async_utils::CancelErr::Cancelled)) => {
+    let stream_setup = client_session
+        .stream(
+            prompt,
+            &step_context.model_info,
+            &step_context.session_telemetry,
+            step_context.reasoning_effort.clone(),
+            step_context.reasoning_summary,
+            step_context.service_tier.clone(),
+            responses_metadata,
+            &inference_trace,
+        )
+        .instrument(trace_span!("stream_request"))
+        .or_cancel(&cancellation_token);
+    let stream_result = match turn_context.provider.info().stream_setup_timeout() {
+        Some(timeout) => match tokio::time::timeout(timeout, stream_setup).await {
+            Ok(result) => result,
+            Err(_) => {
+                return Err(CodexErr::Stream(format!(
+                    "timeout establishing response stream after {timeout:?}"
+                )));
+            }
+        },
+        None => stream_setup.await,
+    };
+    let mut stream = match stream_result {
+        Ok(stream) => stream?,
+        Err(codex_async_utils::CancelErr::Cancelled) => {
             return Err(CodexErr::TurnAborted);
-        }
-        Err(_) => {
-            return Err(CodexErr::Stream(format!(
-                "timeout establishing response stream after {stream_setup_timeout:?}"
-            )));
         }
     };
     let stream_idle_timeout = turn_context.provider.info().stream_idle_timeout();
     let sampling_timeout = turn_context.provider.info().sampling_timeout();
+    let mut sampling_time_remaining = sampling_timeout;
     let mut in_flight: FuturesOrdered<BoxFuture<'static, CodexResult<ResponseInputItem>>> =
         FuturesOrdered::new();
     let mut needs_follow_up = false;
@@ -2280,43 +2283,41 @@ async fn try_run_sampling_request(
             codex.usage.total_tokens = field::Empty,
         );
 
-        let receive_event = async {
-            let event = match tokio::time::timeout(
-                stream_idle_timeout,
-                stream
-                    .next()
-                    .instrument(trace_span!(parent: &handle_responses, "receiving"))
-                    .or_cancel(&cancellation_token),
-            )
-            .await
-            {
-                Ok(Ok(event)) => event,
-                Ok(Err(codex_async_utils::CancelErr::Cancelled)) => {
-                    return Err(CodexErr::TurnAborted);
-                }
-                Err(_) => {
-                    return Err(CodexErr::Stream(format!(
-                        "idle timeout waiting for response event after {stream_idle_timeout:?}"
-                    )));
-                }
-            };
-
-            match event {
-                Some(Ok(event)) => Ok(event),
-                Some(Err(err)) => Err(err),
-                None => Err(CodexErr::Stream(
-                    "stream closed before response.completed".into(),
-                )),
-            }
-        };
-        let event = match sampling_timeout {
-            Some(timeout) => match tokio::time::timeout(timeout, receive_event).await {
-                Ok(result) => result,
-                Err(_) => Err(CodexErr::Stream(format!(
+        let sampling_budget_is_tighter =
+            sampling_time_remaining.is_some_and(|remaining| remaining <= stream_idle_timeout);
+        let receive_timeout = sampling_time_remaining
+            .map(|remaining| remaining.min(stream_idle_timeout))
+            .unwrap_or(stream_idle_timeout);
+        let receive_started = Instant::now();
+        let receive_result = tokio::time::timeout(
+            receive_timeout,
+            stream
+                .next()
+                .instrument(trace_span!(parent: &handle_responses, "receiving"))
+                .or_cancel(&cancellation_token),
+        )
+        .await;
+        if let Some(remaining) = sampling_time_remaining.as_mut() {
+            *remaining = remaining.saturating_sub(receive_started.elapsed());
+        }
+        let event = match receive_result {
+            Ok(Ok(Some(Ok(event)))) => Ok(event),
+            Ok(Ok(Some(Err(err)))) => Err(err),
+            Ok(Ok(None)) => Err(CodexErr::Stream(
+                "stream closed before response.completed".into(),
+            )),
+            Ok(Err(codex_async_utils::CancelErr::Cancelled)) => Err(CodexErr::TurnAborted),
+            Err(_) if sampling_budget_is_tighter => match sampling_timeout {
+                Some(timeout) => Err(CodexErr::Stream(format!(
                     "sampling deadline exceeded after {timeout:?}"
                 ))),
+                None => Err(CodexErr::Stream(format!(
+                    "idle timeout waiting for response event after {stream_idle_timeout:?}"
+                ))),
             },
-            None => receive_event.await,
+            Err(_) => Err(CodexErr::Stream(format!(
+                "idle timeout waiting for response event after {stream_idle_timeout:?}"
+            ))),
         };
         let event = match event {
             Ok(event) => event,
