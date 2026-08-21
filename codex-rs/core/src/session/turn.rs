@@ -663,22 +663,38 @@ fn turn_user_input(input: &[TurnInput]) -> Vec<UserInput> {
 }
 
 fn estimate_turn_input_tokens(input: &[TurnInput]) -> i64 {
-    const TURN_INPUT_SERIALIZATION_FALLBACK_TOKENS: i64 = 16_384;
+    const TURN_INPUT_ITEM_SERIALIZATION_FALLBACK_TOKENS: i64 = 16_384;
     const TURN_INPUT_TRANSFORMATION_MARGIN_TOKENS: i64 = 1_024;
-    match serde_json::to_string(input) {
-        Ok(serialized) => i64::try_from(approx_token_count(&serialized))
-            .unwrap_or(TURN_INPUT_SERIALIZATION_FALLBACK_TOKENS)
-            .saturating_mul(2)
-            .saturating_add(TURN_INPUT_TRANSFORMATION_MARGIN_TOKENS),
+    let serialized_tokens = match serde_json::to_string(input) {
+        Ok(serialized) => i64::try_from(approx_token_count(&serialized)).unwrap_or(i64::MAX),
         Err(error) => {
             warn!(
                 %error,
-                fallback_tokens = TURN_INPUT_SERIALIZATION_FALLBACK_TOKENS,
-                "failed to serialize pending turn input for post-compaction headroom"
+                "failed to serialize complete pending turn input; estimating individual items"
             );
-            TURN_INPUT_SERIALIZATION_FALLBACK_TOKENS
+            input
+                .iter()
+                .map(|item| {
+                    let serialized = match item {
+                        TurnInput::UserInput { content, client_id } => {
+                            serde_json::to_string(&(content, client_id))
+                        }
+                        TurnInput::ResponseItem(envelope) => serde_json::to_string(&envelope.item),
+                        TurnInput::InterAgentCommunication(message) => {
+                            serde_json::to_string(message)
+                        }
+                    };
+                    serialized
+                        .ok()
+                        .and_then(|value| i64::try_from(approx_token_count(&value)).ok())
+                        .unwrap_or(TURN_INPUT_ITEM_SERIALIZATION_FALLBACK_TOKENS)
+                })
+                .fold(0_i64, i64::saturating_add)
         }
-    }
+    };
+    serialized_tokens
+        .saturating_mul(2)
+        .saturating_add(TURN_INPUT_TRANSFORMATION_MARGIN_TOKENS)
 }
 
 async fn required_mcp_servers_for_input(
