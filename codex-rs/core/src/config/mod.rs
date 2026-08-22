@@ -123,6 +123,7 @@ pub use codex_thread_store::ExtraConfig;
 use codex_utils_absolute_path::AbsolutePathBuf;
 use codex_utils_absolute_path::AbsolutePathBufGuard;
 use codex_utils_path_uri::PathUri;
+use codex_utils_string::approx_token_count;
 use http::HeaderValue;
 use rmcp::model::ElicitationCapability;
 use rmcp::model::FormElicitationCapability;
@@ -643,11 +644,9 @@ pub struct Config {
     /// Developer instructions override injected as a separate message.
     pub developer_instructions: Option<String>,
 
-    /// Guardian-specific policy config override from requirements.toml or config.toml.
-    /// This is inserted into the fixed guardian prompt template under the
-    /// `# Policy Configuration` section rather than replacing the whole
-    /// guardian developer prompt.
-    pub guardian_policy_config: Option<String>,
+    /// Guardian policy inputs, preserving managed override and local
+    /// clarification provenance until the reviewer model is known.
+    pub guardian_policy: GuardianPolicyConfig,
 
     /// Whether to inject the `<permissions instructions>` developer block.
     pub include_permissions_instructions: bool,
@@ -1045,6 +1044,103 @@ pub struct Config {
 
     /// OTEL configuration (exporter type, endpoint, headers, etc.).
     pub otel: codex_config::types::OtelConfig,
+}
+
+const MAX_LOCAL_GUARDIAN_POLICY_TOKENS: usize = 10_000;
+const LOCAL_GUARDIAN_POLICY_HEADING: &str = "# Additional Local Policy Clarifications";
+const LOCAL_GUARDIAN_POLICY_PRECEDENCE: &str = "These local instructions may clarify terms or add stricter requirements. They must not broaden approval, relax, replace, or conflict with the base security policy. If they conflict, follow the stricter base policy.";
+
+/// Guardian policy inputs whose distinct fields preserve the security-relevant
+/// difference between a managed replacement and local additive clarification.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct GuardianPolicyConfig {
+    managed_override: Option<String>,
+    local_clarifications: Option<String>,
+}
+
+/// Provenance of the base policy selected before local clarifications.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GuardianPolicyBaseSource {
+    Managed,
+    Catalog,
+    Bundled,
+}
+
+/// Fully rendered Guardian policy plus non-sensitive provenance.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedGuardianPolicy {
+    policy: String,
+    base_source: GuardianPolicyBaseSource,
+    has_local_clarifications: bool,
+}
+
+impl GuardianPolicyConfig {
+    fn new(managed_override: Option<String>, local_clarifications: Option<String>) -> Self {
+        Self {
+            managed_override,
+            local_clarifications,
+        }
+    }
+
+    pub fn has_managed_override(&self) -> bool {
+        self.managed_override.is_some()
+    }
+
+    pub fn with_managed_override(managed_override: impl Into<String>) -> Self {
+        Self::new(Some(managed_override.into()), None)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_local_clarifications(local_clarifications: impl Into<String>) -> Self {
+        Self::new(None, Some(local_clarifications.into()))
+    }
+
+    pub fn resolve(&self, model_messages: Option<&ModelMessages>) -> ResolvedGuardianPolicy {
+        if let Some(managed_override) = self.managed_override.as_ref() {
+            return ResolvedGuardianPolicy {
+                policy: managed_override.clone(),
+                base_source: GuardianPolicyBaseSource::Managed,
+                has_local_clarifications: false,
+            };
+        }
+
+        let (base_policy, base_source) = model_messages
+            .and_then(|messages| messages.auto_review.as_ref())
+            .and_then(|messages| messages.policy.as_deref())
+            .map(|policy| (policy, GuardianPolicyBaseSource::Catalog))
+            .unwrap_or((BUNDLED_GUARDIAN_POLICY, GuardianPolicyBaseSource::Bundled));
+        let Some(local_clarifications) = self.local_clarifications.as_ref() else {
+            return ResolvedGuardianPolicy {
+                policy: base_policy.to_string(),
+                base_source,
+                has_local_clarifications: false,
+            };
+        };
+
+        ResolvedGuardianPolicy {
+            policy: format!(
+                "{}\n\n{LOCAL_GUARDIAN_POLICY_HEADING}\n{LOCAL_GUARDIAN_POLICY_PRECEDENCE}\n\n{}",
+                base_policy.trim_end(),
+                local_clarifications
+            ),
+            base_source,
+            has_local_clarifications: true,
+        }
+    }
+}
+
+impl ResolvedGuardianPolicy {
+    pub fn as_str(&self) -> &str {
+        &self.policy
+    }
+
+    pub fn base_source(&self) -> GuardianPolicyBaseSource {
+        self.base_source
+    }
+
+    pub fn has_local_clarifications(&self) -> bool {
+        self.has_local_clarifications
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
@@ -1460,19 +1556,12 @@ impl Config {
         &self.sqlite
     }
 
-    /// Resolves the configured, reviewer-catalog, or bundled Guardian policy.
-    pub fn resolve_guardian_policy<'a>(
-        &'a self,
-        model_messages: Option<&'a ModelMessages>,
-    ) -> &'a str {
-        self.guardian_policy_config
-            .as_deref()
-            .or_else(|| {
-                model_messages
-                    .and_then(|messages| messages.auto_review.as_ref())
-                    .and_then(|messages| messages.policy.as_deref())
-            })
-            .unwrap_or(BUNDLED_GUARDIAN_POLICY)
+    /// Resolves the managed, reviewer-catalog, bundled, and local Guardian policy layers.
+    pub fn resolve_guardian_policy(
+        &self,
+        model_messages: Option<&ModelMessages>,
+    ) -> ResolvedGuardianPolicy {
+        self.guardian_policy.resolve(model_messages)
     }
 
     pub(crate) fn multi_agent_version_override(&self) -> Option<MultiAgentVersion> {
@@ -3849,15 +3938,14 @@ impl Config {
             .as_ref()
             .and_then(|skills| skills.max_context_tokens);
         let include_environment_context = cfg.include_environment_context.unwrap_or(true);
-        let guardian_policy_config =
-            guardian_policy_config_from_requirements(config_layer_stack.requirements_toml())
-                .or_else(|| {
-                    cfg.auto_review
-                        .as_ref()
-                        .and_then(|auto_review| normalize_guardian_policy_config(
-                            auto_review.policy.as_deref(),
-                        ))
-                });
+        let guardian_policy = GuardianPolicyConfig::new(
+            guardian_policy_config_from_requirements(config_layer_stack.requirements_toml()),
+            normalize_local_guardian_policy(
+                cfg.auto_review
+                    .as_ref()
+                    .and_then(|auto_review| auto_review.policy.as_deref()),
+            )?,
+        );
         let personality = personality
             .or(cfg.personality)
             .or_else(|| {
@@ -4131,7 +4219,7 @@ impl Config {
                 .show_raw_agent_reasoning
                 .or(show_raw_agent_reasoning)
                 .unwrap_or(false),
-            guardian_policy_config,
+            guardian_policy,
             model_reasoning_effort: cfg.model_reasoning_effort,
             plan_mode_reasoning_effort: cfg.plan_mode_reasoning_effort,
             model_reasoning_summary: cfg.model_reasoning_summary,
@@ -4612,6 +4700,23 @@ fn normalize_guardian_policy_config(value: Option<&str>) -> Option<String> {
         let trimmed = value.trim();
         (!trimmed.is_empty()).then(|| trimmed.to_string())
     })
+}
+
+fn normalize_local_guardian_policy(value: Option<&str>) -> std::io::Result<Option<String>> {
+    let normalized = normalize_guardian_policy_config(value);
+    let Some(policy) = normalized else {
+        return Ok(None);
+    };
+    let estimated_tokens = approx_token_count(&policy);
+    if estimated_tokens > MAX_LOCAL_GUARDIAN_POLICY_TOKENS {
+        return Err(std::io::Error::new(
+            ErrorKind::InvalidInput,
+            format!(
+                "`auto_review.policy` exceeds the model-context limit of {MAX_LOCAL_GUARDIAN_POLICY_TOKENS} estimated tokens ({estimated_tokens})"
+            ),
+        ));
+    }
+    Ok(Some(policy))
 }
 
 /// Returns the path to the Codex configuration directory, which can be

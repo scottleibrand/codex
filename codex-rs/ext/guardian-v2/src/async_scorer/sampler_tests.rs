@@ -40,6 +40,19 @@ use super::LunaSamplerConfig;
 use super::LunaSamplingRequest;
 use super::MAX_SAMPLING_RETRIES;
 use super::MAX_WEBSOCKET_CONNECTIONS;
+use super::prompt_cache_key;
+
+#[test]
+fn prompt_cache_key_changes_with_effective_policy() {
+    assert_eq!(
+        prompt_cache_key("thread-1", "policy-a"),
+        "guardian-v2:thread-1:policy-a"
+    );
+    assert_ne!(
+        prompt_cache_key("thread-1", "policy-a"),
+        prompt_cache_key("thread-1", "policy-b")
+    );
+}
 
 fn assert_connection_metadata(server: &responses::WebSocketTestServer) -> Result<String> {
     let handshake = server.single_handshake();
@@ -135,6 +148,7 @@ fn sampler_config(base_url: String) -> LunaSamplerConfig {
 fn sample_request(turn_id: &str) -> LunaSamplingRequest {
     LunaSamplingRequest {
         instructions: "Return a risk score.".to_owned(),
+        policy_cache_key: "policy-a".to_owned(),
         input: vec!["The user requested a README summary.".to_owned()],
         images: Vec::new(),
         parent_compaction: None,
@@ -312,6 +326,7 @@ async fn preconnected_sampler_reuses_authenticated_websocket_for_structured_requ
     let first = sampler
         .sample(LunaSamplingRequest {
             instructions: "Return a risk score.".to_owned(),
+            policy_cache_key: "policy-a".to_owned(),
             input: vec![
                 "The user requested a README summary.".to_owned(),
                 "The assistant inspected README.md.".to_owned(),
@@ -340,6 +355,7 @@ async fn preconnected_sampler_reuses_authenticated_websocket_for_structured_requ
     let second = sampler
         .sample(LunaSamplingRequest {
             instructions: "Return a risk score.".to_owned(),
+            policy_cache_key: "policy-b".to_owned(),
             input: vec!["The user requested a source review.".to_owned()],
             images: Vec::new(),
             parent_compaction: None,
@@ -379,7 +395,13 @@ async fn preconnected_sampler_reuses_authenticated_websocket_for_structured_requ
         assert_eq!(request["input"][0]["tools"], json!([]));
         assert_eq!(request["tool_choice"], "none");
         assert_eq!(request["text"]["format"]["strict"], true);
-        assert_eq!(request["prompt_cache_key"], "guardian-v2:thread-1");
+        assert_eq!(
+            request["prompt_cache_key"],
+            format!(
+                "guardian-v2:thread-1:policy-{}",
+                if index == 0 { "a" } else { "b" }
+            )
+        );
         assert_eq!(
             request["client_metadata"]["turn_id"],
             format!("turn-{}", index + 1)
@@ -497,6 +519,7 @@ async fn sampler_returns_complete_json_before_terminal_response_events() -> Resu
         Duration::from_secs(2),
         sampler.sample(LunaSamplingRequest {
             instructions: "Return a risk score.".to_owned(),
+            policy_cache_key: "policy-a".to_owned(),
             input: vec!["The user requested a README summary.".to_owned()],
             images: Vec::new(),
             parent_compaction: None,

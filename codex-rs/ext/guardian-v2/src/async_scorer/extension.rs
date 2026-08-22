@@ -36,6 +36,8 @@ use codex_protocol::protocol::ReviewDecision;
 use codex_protocol::protocol::TruncationPolicy;
 use codex_protocol::security_risk::SecurityRiskScore;
 use serde_json::json;
+use sha2::Digest;
+use sha2::Sha256;
 
 use super::config::GuardianV2Config;
 use super::sampler::LunaSampler;
@@ -610,7 +612,7 @@ impl GuardianV2Extension {
             let mut classification_finished_at = None;
             let result: Result<&str, String> = async {
                 let config = thread.config().await;
-                let review_model_messages = if config.guardian_policy_config.is_none() {
+                let review_model_messages = if !config.guardian_policy.has_managed_override() {
                     let review_model_id = review_model_override.as_deref().unwrap_or_else(|| {
                         create_model_provider(
                             config.model_provider.clone(),
@@ -634,10 +636,12 @@ impl GuardianV2Extension {
                     None
                 };
                 let policy = config.resolve_guardian_policy(review_model_messages.as_ref());
-                let instructions = guardian_config.render_classifier_instructions(policy);
+                let instructions = guardian_config.render_classifier_instructions(policy.as_str());
+                let policy_cache_key = format!("{:x}", Sha256::digest(instructions.as_bytes()));
                 let output = match sampler
                     .sample(LunaSamplingRequest {
                         instructions,
+                        policy_cache_key,
                         input: classification_input,
                         images,
                         parent_compaction,
