@@ -1452,7 +1452,7 @@ pub(crate) fn build_guardian_review_session_config(
         .and_then(|messages| messages.policy_template.as_deref())
         .unwrap_or(BUNDLED_GUARDIAN_POLICY_TEMPLATE);
     guardian_config.base_instructions = Some(guardian_policy_prompt_with_config_and_template(
-        tenant_policy_config,
+        tenant_policy_config.as_str(),
         policy_template,
     ));
     guardian_config.base_instructions_provenance = Some(BaseInstructionsProvenance::Custom);
@@ -1957,7 +1957,8 @@ mod tests {
         let mut parent_config = crate::config::test_config().await;
         let managed_policy = "Use the managed Guardian policy.";
         let catalog_template = "Catalog Guardian template:\n{{ tenant_policy_config }}";
-        parent_config.guardian_policy_config = Some(managed_policy.to_string());
+        parent_config.guardian_policy =
+            crate::config::GuardianPolicyConfig::with_managed_override(managed_policy);
         let model_messages = ModelMessages {
             instructions_template: None,
             instructions_variables: None,
@@ -1991,6 +1992,71 @@ mod tests {
                 catalog_template,
             ))
         );
+    }
+
+    #[tokio::test]
+    async fn guardian_review_session_appends_local_policy_and_changes_reuse_identity() {
+        let catalog_policy = "Use the catalog Guardian policy.";
+        let local_policy = "Require a second reviewer for production changes.";
+        let mut parent_config = crate::config::test_config().await;
+        parent_config.guardian_policy =
+            crate::config::GuardianPolicyConfig::with_local_clarifications(local_policy);
+        let model_messages = ModelMessages {
+            instructions_template: None,
+            instructions_variables: None,
+            approvals: None,
+            collaboration_modes: None,
+            auto_review: Some(AutoReviewMessages {
+                policy: Some(catalog_policy.to_string()),
+                policy_template: None,
+                rejection_instructions: None,
+                timeout_instructions: None,
+            }),
+            permissions: None,
+            multi_agent: None,
+            token_budget: None,
+            guardian_v2: None,
+        };
+
+        let first_config = build_guardian_review_session_config(
+            &parent_config,
+            /*live_network_config*/ None,
+            "active-model",
+            /*reasoning_effort*/ None,
+            Some(&model_messages),
+        )
+        .expect("guardian config");
+        let first_key = GuardianReviewSessionReuseKey::from_spawn_config(
+            &first_config,
+            /*user_instructions*/ None,
+            /*parent_history_version*/ 0,
+        );
+
+        parent_config.guardian_policy =
+            crate::config::GuardianPolicyConfig::with_local_clarifications(
+                "Require two independent reviewers for production changes.",
+            );
+        let second_config = build_guardian_review_session_config(
+            &parent_config,
+            /*live_network_config*/ None,
+            "active-model",
+            /*reasoning_effort*/ None,
+            Some(&model_messages),
+        )
+        .expect("guardian config");
+        let second_key = GuardianReviewSessionReuseKey::from_spawn_config(
+            &second_config,
+            /*user_instructions*/ None,
+            /*parent_history_version*/ 0,
+        );
+
+        let first_instructions = first_config
+            .base_instructions
+            .as_deref()
+            .expect("Guardian instructions");
+        assert!(first_instructions.contains(catalog_policy));
+        assert!(first_instructions.contains(local_policy));
+        assert_ne!(first_key, second_key);
     }
 
     #[tokio::test]

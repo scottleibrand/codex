@@ -55,6 +55,10 @@ const RESPONSES_LITE_METADATA_KEY: &str =
     "ws_request_header_x_openai_internal_codex_responses_lite";
 const TURN_METADATA_KEY: &str = "x-codex-turn-metadata";
 
+fn prompt_cache_key(thread_id: &str, policy_cache_key: &str) -> String {
+    format!("guardian-v2:{thread_id}:{policy_cache_key}")
+}
+
 /// Host-owned provider, authentication, and attribution for one Luna connection.
 pub struct LunaSamplerConfig {
     /// Provider and credentials selected for the owning thread.
@@ -85,6 +89,8 @@ pub struct LunaSamplingRequest {
     pub instructions: String,
     /// Host-supplied Guardian reviews isolated from untrusted transcript entries.
     pub trusted_review_evidence: Vec<String>,
+    /// Hash of the effective Guardian policy used to scope prompt caching.
+    pub policy_cache_key: String,
     /// Ordered untrusted input entries that the model should classify.
     pub input: Vec<String>,
     /// Optional bounded screenshots accompanying the transcript.
@@ -404,6 +410,7 @@ impl LunaSampler {
     /// Sends one tool-less classification request on an exclusively leased WebSocket.
     pub async fn sample(&self, request: LunaSamplingRequest) -> Result<String, LunaSamplerError> {
         let turn_id = request.turn_id;
+        let prompt_cache_key = prompt_cache_key(&self.config.thread_id, &request.policy_cache_key);
         let mut input = vec![
             ResponseItem::AdditionalTools {
                 id: None,
@@ -486,8 +493,12 @@ impl LunaSampler {
             stream_options: None,
             include: Vec::new(),
             service_tier: self.config.service_tier.clone(),
-            prompt_cache_key: Some(format!("guardian-v2:{}", self.config.thread_id)),
-            text: None,
+            prompt_cache_key: Some(prompt_cache_key),
+            text: create_text_param_for_request(
+                /*verbosity*/ None,
+                &Some(request.output_schema),
+                /*output_schema_strict*/ true,
+            ),
             client_metadata: None,
             access_programs: None,
         };

@@ -91,6 +91,7 @@ use codex_protocol::models::BUILT_IN_PERMISSION_PROFILE_WORKSPACE;
 use codex_protocol::models::ManagedFileSystemPermissions;
 use codex_protocol::models::PermissionProfile;
 use codex_protocol::models::SandboxEnforcement;
+use codex_protocol::openai_models::AutoReviewMessages;
 use codex_protocol::openai_models::MultiAgentRoleMessages;
 use codex_protocol::permissions::FileSystemAccessMode;
 use codex_protocol::permissions::FileSystemPath;
@@ -8058,10 +8059,13 @@ async fn load_config_uses_requirements_guardian_policy_config() -> std::io::Resu
     )
     .await?;
 
+    let resolved = config.resolve_guardian_policy(/*model_messages*/ None);
     assert_eq!(
-        config.guardian_policy_config.as_deref(),
-        Some("Use the workspace-managed guardian policy.")
+        resolved.as_str(),
+        "Use the workspace-managed guardian policy."
     );
+    assert_eq!(resolved.base_source(), GuardianPolicyBaseSource::Managed);
+    assert!(!resolved.has_local_clarifications());
 
     Ok(())
 }
@@ -8104,9 +8108,15 @@ async fn load_config_uses_auto_review_guardian_policy_config() -> std::io::Resul
     )
     .await?;
 
-    assert_eq!(
-        config.guardian_policy_config.as_deref(),
-        Some("Use the user-configured guardian policy.")
+    let resolved = config.resolve_guardian_policy(/*model_messages*/ None);
+    assert_eq!(resolved.base_source(), GuardianPolicyBaseSource::Bundled);
+    assert!(resolved.has_local_clarifications());
+    assert!(resolved.as_str().starts_with(BUNDLED_GUARDIAN_POLICY));
+    assert!(resolved.as_str().contains(LOCAL_GUARDIAN_POLICY_HEADING));
+    assert!(
+        resolved
+            .as_str()
+            .ends_with("Use the user-configured guardian policy.")
     );
 
     Ok(())
@@ -8143,10 +8153,10 @@ async fn requirements_guardian_policy_beats_auto_review() -> std::io::Result<()>
     )
     .await?;
 
-    assert_eq!(
-        config.guardian_policy_config.as_deref(),
-        Some("Use the managed guardian policy.")
-    );
+    let resolved = config.resolve_guardian_policy(/*model_messages*/ None);
+    assert_eq!(resolved.as_str(), "Use the managed guardian policy.");
+    assert_eq!(resolved.base_source(), GuardianPolicyBaseSource::Managed);
+    assert!(!resolved.has_local_clarifications());
 
     Ok(())
 }
@@ -8171,7 +8181,9 @@ async fn load_config_ignores_empty_auto_review_guardian_policy_config() -> std::
     )
     .await?;
 
-    assert_eq!(config.guardian_policy_config, None);
+    let resolved = config.resolve_guardian_policy(/*model_messages*/ None);
+    assert_eq!(resolved.as_str(), BUNDLED_GUARDIAN_POLICY);
+    assert!(!resolved.has_local_clarifications());
 
     Ok(())
 }
@@ -8201,8 +8213,85 @@ async fn load_config_ignores_empty_requirements_guardian_policy_config() -> std:
     )
     .await?;
 
-    assert_eq!(config.guardian_policy_config, None);
+    let resolved = config.resolve_guardian_policy(/*model_messages*/ None);
+    assert_eq!(resolved.as_str(), BUNDLED_GUARDIAN_POLICY);
+    assert_eq!(resolved.base_source(), GuardianPolicyBaseSource::Bundled);
 
+    Ok(())
+}
+
+#[test]
+fn local_guardian_policy_appends_to_catalog_policy_with_fixed_precedence() {
+    let policy = GuardianPolicyConfig::with_local_clarifications(
+        "Require a second reviewer for production changes.",
+    );
+    let model_messages = ModelMessages {
+        instructions_template: None,
+        instructions_variables: None,
+        approvals: None,
+        collaboration_modes: None,
+        auto_review: Some(AutoReviewMessages {
+            policy: Some("Catalog base policy.".to_string()),
+            policy_template: None,
+            rejection_instructions: None,
+            timeout_instructions: None,
+        }),
+        permissions: None,
+        multi_agent: None,
+        token_budget: None,
+        guardian_v2: None,
+    };
+
+    let resolved = policy.resolve(Some(&model_messages));
+
+    assert_eq!(resolved.base_source(), GuardianPolicyBaseSource::Catalog);
+    assert!(resolved.has_local_clarifications());
+    assert!(resolved.as_str().starts_with("Catalog base policy."));
+    assert!(resolved.as_str().contains(LOCAL_GUARDIAN_POLICY_PRECEDENCE));
+    assert!(
+        resolved
+            .as_str()
+            .ends_with("Require a second reviewer for production changes.")
+    );
+}
+
+#[test]
+fn local_guardian_policy_placeholder_is_not_recursively_expanded() {
+    let policy =
+        GuardianPolicyConfig::with_local_clarifications("Keep {{ tenant_policy_config }} literal.");
+
+    let resolved = policy.resolve(/*model_messages*/ None);
+
+    assert!(
+        resolved
+            .as_str()
+            .ends_with("Keep {{ tenant_policy_config }} literal.")
+    );
+}
+
+#[tokio::test]
+async fn load_config_rejects_oversized_local_guardian_policy() -> std::io::Result<()> {
+    let codex_home = TempDir::new()?;
+    let cfg = ConfigToml {
+        auto_review: Some(AutoReviewToml {
+            policy: Some("word ".repeat(MAX_LOCAL_GUARDIAN_POLICY_TOKENS + 1)),
+        }),
+        ..Default::default()
+    };
+
+    let error = Config::load_from_base_config_with_overrides(
+        cfg,
+        ConfigOverrides {
+            cwd: Some(codex_home.path().to_path_buf()),
+            ..Default::default()
+        },
+        codex_home.abs(),
+    )
+    .await
+    .expect_err("oversized local Guardian policy should fail config load");
+
+    assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+    assert!(error.to_string().contains("`auto_review.policy` exceeds"));
     Ok(())
 }
 

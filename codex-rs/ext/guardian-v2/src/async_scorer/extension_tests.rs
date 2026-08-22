@@ -52,6 +52,7 @@ use core_test_support::test_codex::TestCodex;
 use core_test_support::test_codex::test_codex;
 use pretty_assertions::assert_eq;
 use serde_json::json;
+use sha2::Digest;
 
 use super::CLASSIFICATION_DURATION_METRIC;
 use super::CLASSIFICATION_METRIC;
@@ -690,7 +691,11 @@ async fn sample_configured_conversation_history(
                 .policy = Some(TEST_CATALOG_GUARDIAN_POLICY.to_owned());
         })
         .with_model("gpt-5.5")
-        .with_config(move |config| config.guardian_policy_config = guardian_policy)
+        .with_config(move |config| {
+            config.guardian_policy = guardian_policy
+                .map(codex_core::config::GuardianPolicyConfig::with_managed_override)
+                .unwrap_or_default();
+        })
         .with_pre_build_hook(move |home| {
             if !guardian_config.is_empty() {
                 std::fs::write(home.join("config.toml"), guardian_config)
@@ -2021,6 +2026,20 @@ async fn contributor_uses_catalog_policy_without_a_configured_override() -> Resu
         })
     );
     assert_eq!(request["input"][2]["role"], "user");
+    assert_eq!(
+        request["prompt_cache_key"],
+        format!(
+            "guardian-v2:{}:{:x}",
+            request["client_metadata"]["thread_id"]
+                .as_str()
+                .expect("classifier thread id"),
+            sha2::Sha256::digest(
+                crate::async_scorer::config::DEFAULT_CLASSIFIER_INSTRUCTIONS
+                    .replace("{{ tenant_policy_config }}", TEST_CATALOG_GUARDIAN_POLICY)
+                    .as_bytes()
+            )
+        )
+    );
     assert!(
         !request["input"][2]["content"]
             .as_array()
