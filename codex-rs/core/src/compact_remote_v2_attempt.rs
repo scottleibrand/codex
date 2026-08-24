@@ -6,6 +6,8 @@ use super::run_remote_compaction_request_v2;
 use crate::Prompt;
 use crate::client::ModelClientSession;
 use crate::compact::CompactionAnalyticsDetails;
+use crate::compact_remote::remote_compact_reserved_tool_schema_mismatch;
+use crate::compact_remote::remote_compact_tools_without_reserved_namespace;
 use crate::compact_remote::trim_function_call_history_to_fit_context_window;
 use crate::responses_metadata::CodexResponsesRequestKind;
 use crate::responses_metadata::CompactionTurnMetadata;
@@ -19,6 +21,7 @@ use codex_protocol::protocol::RawResponseCompletedEvent;
 use codex_protocol::protocol::TokenUsage;
 use codex_rollout_trace::CompactionTraceContext;
 use tracing::info;
+use tracing::warn;
 
 pub(super) struct RemoteCompactV2Attempt {
     pub(super) trace_input_history: Option<Vec<ResponseItem>>,
@@ -85,7 +88,7 @@ pub(super) async fn run_remote_compact_v2_attempt(
     }
     let tool_router = &step_context.tool_router;
     input.push(ResponseItem::CompactionTrigger {});
-    let prompt = Prompt {
+    let mut prompt = Prompt {
         input,
         tools: tool_router.model_visible_specs(),
         parallel_tool_calls: true,
@@ -111,7 +114,7 @@ pub(super) async fn run_remote_compact_v2_attempt(
         Some(client_session) => client_session,
         None => owned_client_session.insert(sess.services.model_client.new_session()),
     };
-    let compaction_output_result = run_remote_compaction_request_v2(
+    let mut compaction_output_result = run_remote_compaction_request_v2(
         sess,
         turn_context.as_ref(),
         client_session,
@@ -119,6 +122,25 @@ pub(super) async fn run_remote_compact_v2_attempt(
         &responses_metadata,
     )
     .await;
+    if let Err(error) = &compaction_output_result
+        && let Some(qualified_name) = remote_compact_reserved_tool_schema_mismatch(error)
+        && let Some(filtered_tools) =
+            remote_compact_tools_without_reserved_namespace(&prompt.tools, &qualified_name)
+    {
+        warn!(
+            reserved_tool = %qualified_name,
+            "retrying remote compaction without reserved tool namespace"
+        );
+        prompt.tools = filtered_tools;
+        compaction_output_result = run_remote_compaction_request_v2(
+            sess,
+            turn_context.as_ref(),
+            client_session,
+            &prompt,
+            &responses_metadata,
+        )
+        .await;
+    }
     trace_attempt.record_result(
         compaction_output_result
             .as_ref()

@@ -68,6 +68,31 @@ pub(crate) fn remote_compact_error_is_context_overflow(error: &CodexErr) -> bool
         || (message.contains("prompt tokens") && message.contains("exceed model maximum"))
 }
 
+pub(crate) fn remote_compact_reserved_tool_schema_mismatch(error: &CodexErr) -> Option<String> {
+    const PREFIX: &str = "base-model input encode failed: Invalid Value: 'tools'. Function '";
+    const SUFFIX: &str = "' is reserved for use by this model and must match the configured schema";
+
+    let message = error.to_string();
+    let (_, remainder) = message.split_once(PREFIX)?;
+    let (qualified_name, _) = remainder.split_once(SUFFIX)?;
+    (!qualified_name.is_empty()).then(|| qualified_name.to_string())
+}
+
+pub(crate) fn remote_compact_tools_without_reserved_namespace(
+    tools: &Arc<[ToolSpec]>,
+    qualified_name: &str,
+) -> Option<Arc<[ToolSpec]>> {
+    let reserved_namespace = qualified_name
+        .split_once('.')
+        .map_or(qualified_name, |(namespace, _)| namespace);
+    let filtered = tools
+        .iter()
+        .filter(|tool| tool.name() != reserved_namespace)
+        .cloned()
+        .collect::<Vec<_>>();
+    (filtered.len() != tools.len()).then(|| Arc::from(filtered))
+}
+
 pub(crate) async fn recover_from_remote_compact_context_overflow(
     sess: &Arc<Session>,
     step_context: &Arc<StepContext>,
