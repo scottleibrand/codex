@@ -4,9 +4,9 @@ use std::sync::OnceLock;
 use super::trim_function_call_history_to_fit_context_window;
 use crate::Prompt;
 use crate::client::CompactConversationRequestSettings;
+use crate::client_common::reserved_tool_schema_mismatch;
+use crate::client_common::tools_without_reserved_namespace;
 use crate::compact::CompactionAnalyticsDetails;
-use crate::compact_remote::remote_compact_reserved_tool_schema_mismatch;
-use crate::compact_remote::remote_compact_tools_without_reserved_namespace;
 use crate::responses_metadata::CodexResponsesRequestKind;
 use crate::responses_metadata::CompactionTurnMetadata;
 use crate::session::session::Session;
@@ -99,9 +99,9 @@ pub(super) async fn run_remote_compact_attempt(
         )
         .await;
     if let Err(error) = &new_history_result
-        && let Some(qualified_name) = remote_compact_reserved_tool_schema_mismatch(error)
+        && let Some(qualified_name) = reserved_tool_schema_mismatch(error)
         && let Some(filtered_tools) =
-            remote_compact_tools_without_reserved_namespace(&prompt.tools, &qualified_name)
+            tools_without_reserved_namespace(&prompt.tools, &qualified_name)
     {
         warn!(
             reserved_tool = %qualified_name,

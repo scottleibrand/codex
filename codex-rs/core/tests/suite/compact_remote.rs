@@ -1815,6 +1815,84 @@ async fn remote_compact_v2_retries_failures_with_stream_retry_budget() -> Result
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn sampling_retries_reserved_tool_schema_mismatch_without_namespace() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let harness = TestCodexHarness::with_builder(test_codex().with_config(|config| {
+        let _ = config.features.enable(Feature::Collab);
+        let _ = config.features.enable(Feature::MultiAgentV2);
+        config.model_provider.request_max_retries = Some(0);
+        config.model_provider.stream_max_retries = Some(0);
+    }))
+    .await?;
+    let codex = harness.test().codex.clone();
+
+    let responses_mock = responses::mount_response_sequence(
+        harness.server(),
+        vec![
+            ResponseTemplate::new(400).set_body_json(json!({
+                "error": {
+                    "code": "validation_error",
+                    "message": "base-model input encode failed: Invalid Value: 'tools'. Function 'collaboration.spawn_agent' is reserved for use by this model and must match the configured schema",
+                    "type": "invalid_request_error",
+                }
+            })),
+            responses::sse_response(responses::sse(vec![
+                responses::ev_assistant_message("m1", "RECOVERED_REPLY"),
+                responses::ev_completed("resp-1"),
+            ])),
+        ],
+    )
+    .await;
+
+    codex
+        .start_or_steer_turn(TurnInputRequest::user_input(vec![UserInput::Text {
+            text: "hello after compact".into(),
+            text_elements: Vec::new(),
+        }]))
+        .await?;
+    wait_for_turn_complete(&codex).await;
+
+    let response_requests = responses_mock.requests();
+    assert_eq!(
+        2,
+        response_requests.len(),
+        "expected rejected sampling request and one filtered retry"
+    );
+
+    let original_tools = response_requests[0]
+        .body_json()
+        .get("tools")
+        .and_then(Value::as_array)
+        .cloned()
+        .expect("original sampling request should include tools");
+    let retry_tools = response_requests[1]
+        .body_json()
+        .get("tools")
+        .and_then(Value::as_array)
+        .cloned()
+        .expect("retried sampling request should include tools");
+    assert!(
+        !namespace_child_tool_names(&response_requests[0].body_json(), "collaboration").is_empty(),
+        "original sampling request should include collaboration tools"
+    );
+    assert!(
+        namespace_child_tool_names(&response_requests[1].body_json(), "collaboration").is_empty(),
+        "retried sampling request should omit collaboration tools"
+    );
+    let expected_retry_tools = original_tools
+        .into_iter()
+        .filter(|tool| tool.get("name").and_then(Value::as_str) != Some("collaboration"))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        expected_retry_tools, retry_tools,
+        "retry should preserve every tool outside the rejected namespace"
+    );
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn remote_compact_v2_retries_reserved_tool_schema_mismatch_without_namespace() -> Result<()> {
     skip_if_no_network!(Ok(()));
 

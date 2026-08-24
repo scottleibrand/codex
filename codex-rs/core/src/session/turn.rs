@@ -7,6 +7,8 @@ use std::time::Instant;
 use crate::client::ModelClientSession;
 use crate::client_common::Prompt;
 use crate::client_common::ResponseEvent;
+use crate::client_common::reserved_tool_schema_mismatch;
+use crate::client_common::tools_without_reserved_namespace;
 use crate::compact::InitialContextInjection;
 use crate::compact::run_inline_auto_compact_task;
 use crate::compact_remote::run_inline_remote_auto_compact_task;
@@ -1425,6 +1427,7 @@ async fn run_sampling_request(
     let mut initial_input = Some(input);
     let mut original_input = None;
     let mut executed_tool_calls_by_output = HashMap::new();
+    let mut reserved_tool_to_omit = None;
     loop {
         let prompt_input = if let Some(input) = initial_input.take() {
             input
@@ -1440,11 +1443,17 @@ async fn run_sampling_request(
         {
             codex_protocol::models::bound_executed_tool_calls_for_prompt(&mut prompt_input);
         }
-        let prompt = build_prompt(
+        let mut prompt = build_prompt(
             prompt_input,
             step_context.as_ref(),
             base_instructions.clone(),
         );
+        if let Some(qualified_name) = reserved_tool_to_omit.as_deref()
+            && let Some(filtered_tools) =
+                tools_without_reserved_namespace(&prompt.tools, qualified_name)
+        {
+            prompt.tools = filtered_tools;
+        }
         let sampling_attempt = try_run_sampling_request(
             tool_runtime.clone(),
             Arc::clone(&sess),
@@ -1456,7 +1465,32 @@ async fn run_sampling_request(
             &prompt,
             cancellation_token.child_token(),
         );
-        let sampling_result = sampling_attempt.await;
+        let mut sampling_result = sampling_attempt.await;
+        if reserved_tool_to_omit.is_none()
+            && let Err(error) = &sampling_result
+            && let Some(qualified_name) = reserved_tool_schema_mismatch(error)
+            && let Some(filtered_tools) =
+                tools_without_reserved_namespace(&prompt.tools, &qualified_name)
+        {
+            warn!(
+                reserved_tool = %qualified_name,
+                "retrying sampling without reserved tool namespace"
+            );
+            prompt.tools = filtered_tools;
+            reserved_tool_to_omit = Some(qualified_name);
+            sampling_result = try_run_sampling_request(
+                tool_runtime.clone(),
+                Arc::clone(&sess),
+                Arc::clone(&step_context),
+                Arc::clone(&turn_store),
+                client_session,
+                responses_metadata,
+                Arc::clone(&turn_diff_tracker),
+                &prompt,
+                cancellation_token.child_token(),
+            )
+            .await;
+        }
         let err = match sampling_result {
             Ok(output) => {
                 return Ok((output, original_input.unwrap_or(prompt.input)));
