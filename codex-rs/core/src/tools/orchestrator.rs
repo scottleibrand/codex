@@ -171,35 +171,12 @@ impl ToolOrchestrator {
         });
         match &requirement {
             ExecApprovalRequirement::Skip { .. } => {
-                if strict_auto_review {
-                    let action = tool
-                        .approval_action(req, &tool_ctx.call_id)
-                        .map_err(|err| {
-                            ToolError::Rejected(format!("could not prepare approval action: {err}"))
-                        })?;
-                    let approval_ctx = ApprovalContext {
-                        review_context: GuardianReviewContext::from(&tool_ctx.step_context),
-                        cancellation_token: Some(tool_ctx.cancellation_token.clone()),
-                        call_id: tool_ctx.call_id.clone(),
-                        tool_name: tool_ctx.tool_name.clone(),
-                        strict_auto_review,
-                        approval_reason: None,
-                        retry_reason: None,
-                        network_approval_context: None,
-                    };
-                    tool_ctx
-                        .session
-                        .request_approval(action, approval_ctx)
-                        .await?;
-                    already_approved = true;
-                } else {
-                    otel.tool_decision(
-                        &tool_ctx.tool_name,
-                        otel_ci,
-                        &ReviewDecision::Approved,
-                        Some(ToolDecisionSource::Config),
-                    );
-                }
+                otel.tool_decision(
+                    &tool_ctx.tool_name,
+                    otel_ci,
+                    &ReviewDecision::Approved,
+                    Some(ToolDecisionSource::Config),
+                );
             }
             ExecApprovalRequirement::Forbidden { reason } => {
                 return Err(ToolError::Rejected(reason.clone()));

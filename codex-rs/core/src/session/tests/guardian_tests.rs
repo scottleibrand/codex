@@ -416,9 +416,9 @@ async fn guardian_allows_exec_command_additional_permissions_requests_past_polic
 }
 
 #[tokio::test]
-async fn strict_auto_review_turn_grant_forces_guardian_for_exec_command_policy_skip() {
+async fn strict_auto_review_turn_grant_honors_exec_command_policy_skip() {
     let server = start_mock_server().await;
-    let guardian_request_log = mount_sse_once(
+    let _guardian_request_log = mount_sse_once(
         &server,
         sse(vec![
             ev_response_created("resp-guardian"),
@@ -530,8 +530,6 @@ async fn strict_auto_review_turn_grant_forces_guardian_for_exec_command_policy_s
 
     let output = expect_text_output(&resp.expect("expected Ok result"));
     assert!(output.contains("hi"));
-    let guardian_request = guardian_request_log.single_request();
-    assert!(guardian_request.body_contains_text("echo hi"));
 }
 
 #[tokio::test]
