@@ -709,6 +709,30 @@ fn commands_for_exec_policy_falls_back_for_whitespace_shell_script() {
     );
 }
 
+#[test]
+fn commands_for_exec_policy_recursively_parses_plain_shell_wrappers() {
+    let command = vec![
+        "/bin/bash".to_string(),
+        "-lc".to_string(),
+        "/bin/bash -c 'auto-ops-codex-exec --full -- slack-schedule 20m safe'".to_string(),
+    ];
+
+    assert_eq!(
+        commands_for_exec_policy(&command),
+        ExecPolicyCommands {
+            commands: vec![vec![
+                "auto-ops-codex-exec".to_string(),
+                "--full".to_string(),
+                "--".to_string(),
+                "slack-schedule".to_string(),
+                "20m".to_string(),
+                "safe".to_string(),
+            ]],
+            command_origin: ExecPolicyCommandOrigin::Generic,
+        }
+    );
+}
+
 #[tokio::test]
 async fn ignore_user_config_keeps_user_policy_files() -> std::io::Result<()> {
     let temp = tempdir()?;
