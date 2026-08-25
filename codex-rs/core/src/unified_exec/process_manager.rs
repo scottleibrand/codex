@@ -1253,6 +1253,7 @@ impl UnifiedExecProcessManager {
             .shell
             .as_ref()
             .unwrap_or(session_shell.as_ref());
+        let policy_cwd = cwd.to_abs_path().ok();
         let exec_approval_requirement = context
             .session
             .services
@@ -1274,6 +1275,7 @@ impl UnifiedExecProcessManager {
                 },
                 configured_shell,
                 &request.shell_mode,
+                policy_cwd.as_deref(),
             )
             .await;
         let req = UnifiedExecToolRequest {
