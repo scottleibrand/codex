@@ -4,7 +4,7 @@ use super::ExecPolicyCommandOrigin;
 #[cfg(windows)]
 use super::ExecPolicyCommands;
 use super::ExecPolicyManager;
-use super::commands_for_exec_policy;
+use super::commands_for_exec_policy_at_cwd;
 use crate::shell::Shell;
 use crate::tools::sandboxing::ExecApprovalRequirement;
 #[cfg(windows)]
@@ -20,12 +20,14 @@ impl ExecPolicyManager {
         mut request: ExecApprovalRequest<'_>,
         configured_shell: &Shell,
         shell_mode: &UnifiedExecShellMode,
+        cwd: Option<&Path>,
     ) -> ExecApprovalRequirement {
         let command = request.command;
         let executable = shell_approval_command(command, configured_shell, shell_mode);
         if executable.len() == command.len() {
+            let policy_commands = commands_for_exec_policy_at_cwd(command, cwd);
             return self
-                .create_exec_approval_requirement_for_command(request)
+                .create_exec_approval_requirement_for_parsed_commands(request, policy_commands)
                 .await;
         }
 
@@ -36,11 +38,11 @@ impl ExecPolicyManager {
                     .unwrap_or_else(|| vec![command.to_vec()]),
                 command_origin: ExecPolicyCommandOrigin::PowerShell,
             },
-            None => commands_for_exec_policy(command),
+            None => commands_for_exec_policy_at_cwd(command, cwd),
         };
 
         #[cfg(not(windows))]
-        let mut policy_commands = commands_for_exec_policy(command);
+        let mut policy_commands = commands_for_exec_policy_at_cwd(command, cwd);
 
         // Evaluate the executable alongside its apparent commands. Inner
         // commands can add restrictions, but cannot grant the executable trust.

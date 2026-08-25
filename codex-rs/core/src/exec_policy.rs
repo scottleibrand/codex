@@ -312,6 +312,7 @@ impl ExecPolicyManager {
         self.policy.load_full()
     }
 
+    #[cfg(test)]
     pub(crate) async fn create_exec_approval_requirement_for_command(
         &self,
         req: ExecApprovalRequest<'_>,
@@ -840,6 +841,7 @@ const MAX_NESTED_SHELL_DEPTH: usize = 8;
 fn parse_nested_shell_commands(
     command: &[String],
     remaining_depth: usize,
+    cwd: Option<&Path>,
 ) -> Option<Vec<Vec<String>>> {
     let commands = parse_shell_lc_plain_commands(command)?;
     if commands.is_empty() {
@@ -847,9 +849,10 @@ fn parse_nested_shell_commands(
     }
 
     let mut flattened = Vec::new();
-    for command in commands {
+    for mut command in commands {
+        canonicalize_nested_program(&mut command, cwd);
         if remaining_depth > 0
-            && let Some(nested) = parse_nested_shell_commands(&command, remaining_depth - 1)
+            && let Some(nested) = parse_nested_shell_commands(&command, remaining_depth - 1, cwd)
         {
             flattened.extend(nested);
         } else {
@@ -859,8 +862,21 @@ fn parse_nested_shell_commands(
     Some(flattened)
 }
 
-fn commands_for_exec_policy(command: &[String]) -> ExecPolicyCommands {
-    if let Some(commands) = parse_nested_shell_commands(command, MAX_NESTED_SHELL_DEPTH)
+fn canonicalize_nested_program(command: &mut [String], cwd: Option<&Path>) {
+    let (Some(program), Some(cwd)) = (command.first_mut(), cwd) else {
+        return;
+    };
+    let path = Path::new(program);
+    if path.is_absolute() || path.components().count() < 2 {
+        return;
+    }
+    if let Ok(canonical) = std::fs::canonicalize(cwd.join(path)) {
+        *program = canonical.to_string_lossy().into_owned();
+    }
+}
+
+fn commands_for_exec_policy_at_cwd(command: &[String], cwd: Option<&Path>) -> ExecPolicyCommands {
+    if let Some(commands) = parse_nested_shell_commands(command, MAX_NESTED_SHELL_DEPTH, cwd)
         && !commands.is_empty()
     {
         return ExecPolicyCommands {
@@ -886,6 +902,11 @@ fn commands_for_exec_policy(command: &[String]) -> ExecPolicyCommands {
         commands: vec![command.to_vec()],
         command_origin: ExecPolicyCommandOrigin::Generic,
     }
+}
+
+#[cfg(test)]
+fn commands_for_exec_policy(command: &[String]) -> ExecPolicyCommands {
+    commands_for_exec_policy_at_cwd(command, None)
 }
 
 /// Derive a proposed execpolicy amendment when a command requires user approval

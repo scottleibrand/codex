@@ -733,6 +733,35 @@ fn commands_for_exec_policy_recursively_parses_plain_shell_wrappers() {
     );
 }
 
+#[test]
+fn commands_for_exec_policy_resolves_nested_relative_program_from_cwd() {
+    let cwd = tempdir().expect("create cwd");
+    let bin_dir = cwd.path().join("bin");
+    fs::create_dir(&bin_dir).expect("create bin");
+    let launcher = bin_dir.join("auto-ops-codex-exec");
+    fs::write(&launcher, "").expect("create launcher");
+    let canonical_launcher = fs::canonicalize(&launcher).expect("canonicalize launcher");
+    let command = vec![
+        "/bin/bash".to_string(),
+        "-c".to_string(),
+        "bin/auto-ops-codex-exec --full -- post-comment OPS-279233".to_string(),
+    ];
+
+    assert_eq!(
+        commands_for_exec_policy_at_cwd(&command, Some(cwd.path())),
+        ExecPolicyCommands {
+            commands: vec![vec![
+                canonical_launcher.to_string_lossy().into_owned(),
+                "--full".to_string(),
+                "--".to_string(),
+                "post-comment".to_string(),
+                "OPS-279233".to_string(),
+            ]],
+            command_origin: ExecPolicyCommandOrigin::Generic,
+        }
+    );
+}
+
 #[tokio::test]
 async fn ignore_user_config_keeps_user_policy_files() -> std::io::Result<()> {
     let temp = tempdir()?;
