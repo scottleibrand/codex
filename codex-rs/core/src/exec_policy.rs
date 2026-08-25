@@ -832,8 +832,35 @@ pub(crate) fn default_policy_path(codex_home: &Path) -> PathBuf {
     codex_home.join(RULES_DIR_NAME).join(DEFAULT_POLICY_FILE)
 }
 
+const MAX_NESTED_SHELL_DEPTH: usize = 8;
+
+/// Flatten only shell wrappers whose scripts parse completely into literal argv.
+/// Preserve the wrapper at the depth limit or on any parse failure so policy
+/// evaluation remains fail-closed.
+fn parse_nested_shell_commands(
+    command: &[String],
+    remaining_depth: usize,
+) -> Option<Vec<Vec<String>>> {
+    let commands = parse_shell_lc_plain_commands(command)?;
+    if commands.is_empty() {
+        return None;
+    }
+
+    let mut flattened = Vec::new();
+    for command in commands {
+        if remaining_depth > 0
+            && let Some(nested) = parse_nested_shell_commands(&command, remaining_depth - 1)
+        {
+            flattened.extend(nested);
+        } else {
+            flattened.push(command);
+        }
+    }
+    Some(flattened)
+}
+
 fn commands_for_exec_policy(command: &[String]) -> ExecPolicyCommands {
-    if let Some(commands) = parse_shell_lc_plain_commands(command)
+    if let Some(commands) = parse_nested_shell_commands(command, MAX_NESTED_SHELL_DEPTH)
         && !commands.is_empty()
     {
         return ExecPolicyCommands {
