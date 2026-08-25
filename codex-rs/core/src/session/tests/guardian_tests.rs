@@ -10,6 +10,7 @@ use crate::tools::context::ToolCallSource;
 use crate::tools::context::ToolOutput;
 use crate::tools::context::ToolPayload;
 use crate::turn_diff_tracker::TurnDiffTracker;
+use codex_config::AutoReviewRequirementsToml;
 use codex_config::ConfigLayerEntry;
 use codex_config::ConfigLayerSource;
 use codex_config::ConfigRequirements;
@@ -412,9 +413,9 @@ async fn guardian_allows_exec_command_additional_permissions_requests_past_polic
 }
 
 #[tokio::test]
-async fn strict_auto_review_turn_grant_honors_exec_command_policy_skip() {
+async fn auto_review_ignore_rules_still_honors_exec_command_policy_skip() {
     let server = start_mock_server().await;
-    let _guardian_request_log = mount_sse_once(
+    let guardian_request_log = mount_sse_once(
         &server,
         sse(vec![
             ev_response_created("resp-guardian"),
@@ -460,6 +461,19 @@ async fn strict_auto_review_turn_grant_honors_exec_command_policy_skip() {
         .set(AskForApproval::Never)
         .expect("test setup should allow updating approval policy");
     let mut config = (*turn_context_raw.config).clone();
+    let layers = config
+        .config_layer_stack
+        .all_layers_low_to_high()
+        .cloned()
+        .collect();
+    let requirements = config.config_layer_stack.requirements().clone();
+    let mut requirements_toml = config.config_layer_stack.requirements_toml().clone();
+    requirements_toml.auto_review = Some(AutoReviewRequirementsToml {
+        required_on_models: None,
+        ignore_rules: Some(vec![turn_context_raw.model_info.slug.clone()]),
+    });
+    config.config_layer_stack =
+        ConfigLayerStack::new(layers, requirements, requirements_toml).expect("config layer stack");
     config
         .permissions
         .set_permission_profile(codex_protocol::models::PermissionProfile::Disabled)
@@ -527,6 +541,7 @@ async fn strict_auto_review_turn_grant_honors_exec_command_policy_skip() {
 
     let output = expect_text_output(&resp.expect("expected Ok result"));
     assert!(output.contains("hi"));
+    assert!(guardian_request_log.requests().is_empty());
 }
 
 #[tokio::test]

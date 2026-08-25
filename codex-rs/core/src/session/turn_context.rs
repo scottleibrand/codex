@@ -242,16 +242,7 @@ impl TurnContext {
     }
 
     pub(crate) fn allow_prefix_rules(&self) -> AllowPrefixRules {
-        let ignore_rules = self
-            .config
-            .config_layer_stack
-            .requirements_toml()
-            .auto_review
-            .as_ref()
-            .and_then(|auto_review| auto_review.ignore_rules.as_ref())
-            .is_some_and(|models| models.contains(&self.model_info.slug));
-        if self.model_info.model_specialty.as_deref() == Some(MODEL_SPECIALTY_CYBER) || ignore_rules
-        {
+        if self.model_info.model_specialty.as_deref() == Some(MODEL_SPECIALTY_CYBER) {
             AllowPrefixRules::IgnoreForCyberModel
         } else {
             AllowPrefixRules::Honor
