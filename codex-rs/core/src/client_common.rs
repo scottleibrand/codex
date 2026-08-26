@@ -1,4 +1,5 @@
 pub use codex_api::ResponseEvent;
+use codex_protocol::error::CodexErr;
 use codex_protocol::error::Result;
 use codex_protocol::models::BaseInstructions;
 use codex_protocol::models::ContentItem;
@@ -63,6 +64,31 @@ impl Prompt {
         }
         input
     }
+}
+
+pub(crate) fn reserved_tool_schema_mismatch(error: &CodexErr) -> Option<String> {
+    const PREFIX: &str = "base-model input encode failed: Invalid Value: 'tools'. Function '";
+    const SUFFIX: &str = "' is reserved for use by this model and must match the configured schema";
+
+    let message = error.to_string();
+    let (_, remainder) = message.split_once(PREFIX)?;
+    let (qualified_name, _) = remainder.split_once(SUFFIX)?;
+    (!qualified_name.is_empty()).then(|| qualified_name.to_string())
+}
+
+pub(crate) fn tools_without_reserved_namespace(
+    tools: &Arc<[ToolSpec]>,
+    qualified_name: &str,
+) -> Option<Arc<[ToolSpec]>> {
+    let reserved_namespace = qualified_name
+        .split_once('.')
+        .map_or(qualified_name, |(namespace, _)| namespace);
+    let filtered = tools
+        .iter()
+        .filter(|tool| tool.name() != reserved_namespace)
+        .cloned()
+        .collect::<Vec<_>>();
+    (filtered.len() != tools.len()).then(|| Arc::from(filtered))
 }
 
 fn strip_image_details(items: &mut [ResponseItem]) {
