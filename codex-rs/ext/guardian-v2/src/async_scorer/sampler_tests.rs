@@ -407,7 +407,7 @@ async fn preconnected_sampler_reuses_authenticated_websocket_for_classifications
         assert_eq!(request["model"], "gpt-5.6-luna");
         assert_eq!(request["input"][0]["tools"], json!([]));
         assert_eq!(request["tool_choice"], "none");
-        assert_eq!(request["text"]["format"]["strict"], true);
+        assert!(request.get("text").is_none());
         assert_eq!(
             request["prompt_cache_key"],
             format!(

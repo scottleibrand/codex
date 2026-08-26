@@ -494,11 +494,7 @@ impl LunaSampler {
             include: Vec::new(),
             service_tier: self.config.service_tier.clone(),
             prompt_cache_key: Some(prompt_cache_key),
-            text: create_text_param_for_request(
-                /*verbosity*/ None,
-                &Some(request.output_schema),
-                /*output_schema_strict*/ true,
-            ),
+            text: None,
             client_metadata: None,
             access_programs: None,
         };
