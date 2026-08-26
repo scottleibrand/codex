@@ -84,7 +84,7 @@ pub(super) async fn run_remote_compact_attempt(
         .compact_conversation_history(
             &prompt,
             turn_context.model_info(),
-            turn_state,
+            turn_state.clone(),
             CompactConversationRequestSettings {
                 effort: turn_context.reasoning_effort().cloned(),
                 summary: turn_context.reasoning_summary(),
