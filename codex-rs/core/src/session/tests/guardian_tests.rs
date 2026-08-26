@@ -474,7 +474,7 @@ async fn auto_review_ignore_rules_still_honors_exec_command_policy_skip() {
     let mut requirements_toml = config.config_layer_stack.requirements_toml().clone();
     requirements_toml.auto_review = Some(AutoReviewRequirementsToml {
         required_on_models: None,
-        ignore_rules: Some(vec![turn_context_raw.model_info.slug.clone()]),
+        ignore_rules: Some(vec![turn_context_raw.model_info().slug.clone()]),
     });
     config.config_layer_stack =
         ConfigLayerStack::new(layers, requirements, requirements_toml).expect("config layer stack");

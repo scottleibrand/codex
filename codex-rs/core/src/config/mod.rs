@@ -1105,7 +1105,10 @@ pub struct ResolvedGuardianPolicy {
 }
 
 impl GuardianPolicyConfig {
-    fn new(managed_override: Option<String>, local_clarifications: Option<String>) -> Self {
+    pub(crate) fn new(
+        managed_override: Option<String>,
+        local_clarifications: Option<String>,
+    ) -> Self {
         Self {
             managed_override,
             local_clarifications,
