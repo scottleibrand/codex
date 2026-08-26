@@ -5,8 +5,6 @@ use super::trim_function_call_history_to_fit_context_window;
 use crate::Prompt;
 use crate::client::CompactConversationRequestSettings;
 use crate::compact::CompactionAnalyticsDetails;
-use crate::compact_remote::remote_compact_reserved_tool_schema_mismatch;
-use crate::compact_remote::remote_compact_tools_without_reserved_namespace;
 use crate::responses_metadata::CodexResponsesRequestKind;
 use crate::responses_metadata::CompactionTurnMetadata;
 use crate::session::session::Session;
@@ -16,7 +14,6 @@ use codex_protocol::error::Result as CodexResult;
 use codex_protocol::models::ResponseItem;
 use codex_rollout_trace::CompactionTraceContext;
 use tracing::info;
-use tracing::warn;
 
 pub(super) struct RemoteCompactAttempt {
     pub(super) new_history: Vec<ResponseItem>,
@@ -63,7 +60,7 @@ pub(super) async fn run_remote_compact_attempt(
         .then(|| history.raw_items().cloned().collect());
     let prompt_input = history.for_prompt(&turn_context.model_info().input_modalities);
     let tool_router = &step_context.tool_router;
-    let mut prompt = Prompt {
+    let prompt = Prompt {
         input: prompt_input,
         tools: tool_router.model_visible_specs(),
         parallel_tool_calls: true,
@@ -78,7 +75,7 @@ pub(super) async fn run_remote_compact_attempt(
             CodexResponsesRequestKind::Compaction(compaction_metadata),
         )
         .await;
-    let mut new_history_result = sess
+    let new_history = sess
         .services
         .model_client
         .compact_conversation_history(
@@ -98,42 +95,7 @@ pub(super) async fn run_remote_compact_attempt(
             compaction_trace,
             &responses_metadata,
         )
-        .await;
-    if let Err(error) = &new_history_result
-        && let Some(qualified_name) = remote_compact_reserved_tool_schema_mismatch(error)
-        && let Some(filtered_tools) =
-            remote_compact_tools_without_reserved_namespace(&prompt.tools, &qualified_name)
-    {
-        warn!(
-            reserved_tool = %qualified_name,
-            "retrying remote compaction without reserved tool namespace"
-        );
-        prompt.tools = filtered_tools;
-        new_history_result = sess
-            .services
-            .model_client
-            .compact_conversation_history(
-                &prompt,
-                &turn_context.model_info,
-                turn_state,
-                CompactConversationRequestSettings {
-                    effort: turn_context.reasoning_effort.clone(),
-                    summary: turn_context.reasoning_summary,
-                    service_tier: if sess.services.auth_manager.auth_mode()
-                        == Some(AuthMode::ApiKey)
-                    {
-                        None
-                    } else {
-                        turn_context.config.service_tier.clone()
-                    },
-                },
-                &turn_context.session_telemetry,
-                compaction_trace,
-                &responses_metadata,
-            )
-            .await;
-    }
-    let new_history = new_history_result?;
+        .await?;
     Ok(RemoteCompactAttempt {
         new_history,
         trace_input_history,
