@@ -2812,6 +2812,39 @@ async fn multi_agent_v2_namespace_is_supported_by_bedrock_provider() {
 }
 
 #[tokio::test]
+async fn multi_agent_v1_namespace_is_direct_for_bedrock_provider() {
+    let plan = probe(|turn| {
+        set_feature(turn, Feature::Collab, /*enabled*/ true);
+        set_feature(turn, Feature::MultiAgentV2, /*enabled*/ false);
+        use_bedrock_provider(turn);
+    })
+    .await;
+
+    plan.assert_visible_contains(&[MULTI_AGENT_V1_NAMESPACE]);
+    for tool_name in [
+        "spawn_agent",
+        "send_input",
+        "resume_agent",
+        "wait_agent",
+        "close_agent",
+    ] {
+        assert!(
+            plan.namespace_function_names(MULTI_AGENT_V1_NAMESPACE)
+                .iter()
+                .any(|name| name == tool_name),
+            "expected {tool_name} in {MULTI_AGENT_V1_NAMESPACE}"
+        );
+        let namespaced_tool_name =
+            ToolName::namespaced(MULTI_AGENT_V1_NAMESPACE, tool_name).to_string();
+        assert_eq!(
+            plan.exposure(&namespaced_tool_name),
+            ToolExposure::Direct,
+            "expected {namespaced_tool_name} to be direct"
+        );
+    }
+}
+
+#[tokio::test]
 async fn multi_agent_v2_bedrock_workers_only_delegate_when_model_supports_v2() {
     for (model, model_multi_agent_version, supports_delegation) in [
         (

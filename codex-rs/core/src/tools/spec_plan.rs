@@ -1192,7 +1192,9 @@ fn add_collaboration_tools(context: &CoreToolPlanContext<'_>, registry: &mut Too
         } else {
             let agent_type_description =
                 agent_type_description(turn_context, context.default_agent_type_description);
-            let exposure = if search_tool_enabled(turn_context) {
+            let exposure = if search_tool_enabled(turn_context)
+                && !turn_context.provider.info().is_amazon_bedrock()
+            {
                 ToolExposure::Deferred
             } else {
                 ToolExposure::Direct
