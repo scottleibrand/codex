@@ -315,16 +315,33 @@ async fn init_state_db_for_app_server_target(
     app_server_target: &AppServerTarget,
 ) -> std::io::Result<Option<StateDbHandle>> {
     match app_server_target {
-        AppServerTarget::Embedded => state_db::try_init(config).await.map(Some).map_err(|err| {
-            let database_path = codex_state::runtime_db_path_for_corruption_error(&err)
-                .unwrap_or_else(|| config.sqlite_config().state_db_path());
-            std::io::Error::other(LocalStateDbStartupError::new(
-                database_path,
-                format!("{err:#}"),
-            ))
-        }),
+        AppServerTarget::Embedded => {
+            finish_embedded_state_db_init(config, state_db::try_init(config).await)
+        }
         AppServerTarget::LocalDaemon { .. } | AppServerTarget::Remote { .. } => {
             Ok(state_db::get_state_db(config).await)
+        }
+    }
+}
+
+fn finish_embedded_state_db_init(
+    config: &Config,
+    result: anyhow::Result<StateDbHandle>,
+) -> std::io::Result<Option<StateDbHandle>> {
+    match result {
+        Ok(state_db) => Ok(Some(state_db)),
+        Err(err) => {
+            let detail = format!("{err:#}");
+            if codex_state::sqlite_error_detail_is_lock(&detail) {
+                warn!("state database is busy; continuing without local SQLite state: {detail}");
+                return Ok(None);
+            }
+            let database_path = codex_state::runtime_db_path_for_corruption_error(&err)
+                .unwrap_or_else(|| config.sqlite_config().state_db_path());
+            Err(std::io::Error::other(LocalStateDbStartupError::new(
+                database_path,
+                detail,
+            )))
         }
     }
 }
@@ -3343,6 +3360,22 @@ mod tests {
                 .contains("failed to initialize state runtime"),
             "startup error should preserve the underlying state db failure"
         );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn embedded_state_db_lock_continues_without_sqlite() -> color_eyre::Result<()> {
+        let temp_dir = TempDir::new()?;
+        let config = build_config(&temp_dir).await?;
+
+        let state_db = finish_embedded_state_db_init(
+            &config,
+            Err(anyhow::anyhow!(
+                "database is locked: synthetic startup contention"
+            )),
+        )?;
+
+        assert!(state_db.is_none());
         Ok(())
     }
 
