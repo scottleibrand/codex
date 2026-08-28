@@ -92,6 +92,10 @@ pub enum CodexErrorDetails {
     #[error("stream disconnected before completion: {0}")]
     Stream(String),
     #[error(
+        "stream disconnected before completion: timeout establishing response stream after {0:?}"
+    )]
+    ResponseStreamSetupTimeout(Duration),
+    #[error(
         "Codex ran out of room in the model's context window. Start a new thread or clear earlier history before retrying."
     )]
     ContextWindowExceeded,
@@ -322,6 +326,7 @@ impl CodexErr {
 
     codex_err_tuple_constructors!(
         Stream(message: String),
+        ResponseStreamSetupTimeout(timeout: Duration),
         ThreadNotFound(thread_id: ThreadId),
         UnexpectedStatus(error: UnexpectedResponseError),
         InvalidRequest(message: String),
@@ -388,6 +393,7 @@ impl CodexErr {
             | CodexErrorDetails::CyberPolicy { .. }
             | CodexErrorDetails::MisalignmentPolicyViolation { .. } => false,
             CodexErrorDetails::Stream(..)
+            | CodexErrorDetails::ResponseStreamSetupTimeout(_)
             | CodexErrorDetails::Timeout
             | CodexErrorDetails::RequestTimeout
             | CodexErrorDetails::UnexpectedStatus(_)

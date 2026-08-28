@@ -2297,9 +2297,7 @@ async fn try_run_sampling_request(
         Some(timeout) => match tokio::time::timeout(timeout, stream_setup).await {
             Ok(result) => result,
             Err(_) => {
-                return Err(CodexErr::Stream(format!(
-                    "timeout establishing response stream after {timeout:?}"
-                )));
+                return Err(CodexErr::ResponseStreamSetupTimeout(timeout));
             }
         },
         None => stream_setup.await,

@@ -1,9 +1,28 @@
 use super::ResponsesStreamRequest;
+use super::is_unbounded_connection_error;
 use super::log_retry;
 use crate::session::tests::make_session_and_context;
 use codex_protocol::error::CodexErr;
 use std::time::Duration;
 use tracing_test::internal::MockWriter;
+
+#[test]
+fn response_setup_timeout_uses_unbounded_connection_retries_on_bedrock() {
+    let err = CodexErr::ResponseStreamSetupTimeout(Duration::from_secs(60));
+
+    assert!(is_unbounded_connection_error(
+        &err, /*is_amazon_bedrock*/ true
+    ));
+    assert!(is_unbounded_connection_error(
+        &err,
+        /*is_amazon_bedrock*/ false
+    ));
+    assert!(err.is_retryable());
+    assert_eq!(
+        err.to_string(),
+        "stream disconnected before completion: timeout establishing response stream after 60s"
+    );
+}
 
 #[tokio::test]
 async fn sampling_retry_logs_stream_error_context() {

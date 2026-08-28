@@ -60,9 +60,8 @@ pub(crate) async fn handle_retryable_response_stream_error(
         .features
         .enabled(Feature::UnboundedConnectionRetries)
         && matches!(request, ResponsesStreamRequest::Sampling)
-        && matches!(err.details(), CodexErrorDetails::ConnectionFailed(_))
+        && is_unbounded_connection_error(&err, turn_context.provider.info().is_amazon_bedrock())
         && !turn_context.session_source.is_internal()
-        && !turn_context.provider.info().is_amazon_bedrock()
     {
         let retry_delay = retry_state.connection_retry_delay;
         warn!(
@@ -126,6 +125,14 @@ pub(crate) async fn handle_retryable_response_stream_error(
     }
 
     Err(err)
+}
+
+fn is_unbounded_connection_error(err: &CodexErr, is_amazon_bedrock: bool) -> bool {
+    matches!(
+        err.details(),
+        CodexErrorDetails::ResponseStreamSetupTimeout(_)
+    ) || (!is_amazon_bedrock
+        && matches!(err.details(), CodexErrorDetails::ConnectionFailed(_)))
 }
 
 fn log_retry(
