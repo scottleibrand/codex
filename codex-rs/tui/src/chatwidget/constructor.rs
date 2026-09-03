@@ -121,6 +121,8 @@ impl ChatWidget {
             model_catalog,
             session_telemetry,
             session_header: SessionHeader::new(header_model),
+            active_turn_model: None,
+            active_turn_reasoning_effort: None,
             initial_user_message,
             status_account_display,
             runtime_model_provider_base_url,

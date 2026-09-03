@@ -542,7 +542,11 @@ impl ChatWidget {
     }
 
     pub(super) fn model_display_name(&self) -> &str {
-        let model = self.current_model();
+        let model = self
+            .active_turn_model
+            .as_deref()
+            .filter(|model| !model.is_empty())
+            .unwrap_or_else(|| self.current_model());
         if model.is_empty() {
             DEFAULT_MODEL_DISPLAY_NAME
         } else {

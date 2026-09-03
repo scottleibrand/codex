@@ -409,6 +409,24 @@ async fn thread_settings_updated_updates_visible_state_without_transcript() {
 }
 
 #[tokio::test]
+async fn active_turn_status_keeps_its_start_model_until_completion() {
+    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(Some("gpt-5.2")).await;
+
+    handle_turn_started(&mut chat, "turn-1");
+    assert_eq!(chat.model_display_name(), "gpt-5.2");
+
+    chat.set_model("gpt-5.4");
+    assert_eq!(chat.current_model(), "gpt-5.4");
+    assert_eq!(chat.model_display_name(), "gpt-5.2");
+
+    handle_turn_completed(&mut chat, "turn-1", /*duration_ms*/ None);
+    assert_eq!(chat.model_display_name(), "gpt-5.4");
+
+    handle_turn_started(&mut chat, "turn-2");
+    assert_eq!(chat.model_display_name(), "gpt-5.4");
+}
+
+#[tokio::test]
 async fn thread_settings_updated_preserves_default_settings_for_plan_mode() {
     let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(Some("gpt-5.2")).await;
     let thread_id = ThreadId::new();

@@ -68,6 +68,9 @@ impl ChatWidget {
     // Raw reasoning uses the same flow as summarized reasoning
 
     pub(super) fn on_task_started(&mut self) {
+        self.active_turn_model = Some(self.current_model().to_string());
+        self.active_turn_reasoning_effort = Some(self.effective_reasoning_effort());
+        self.refresh_status_surfaces();
         self.input_queue.user_turn_pending_start = false;
         self.reset_safety_buffering_for_turn_start();
         self.turn_lifecycle.start(Instant::now());
@@ -313,6 +316,9 @@ impl ChatWidget {
     /// This does not clear MCP startup tracking, because MCP startup can overlap with turn cleanup
     /// and should continue to drive the bottom-pane running indicator while it is in progress.
     pub(super) fn finalize_turn(&mut self) {
+        self.active_turn_model = None;
+        self.active_turn_reasoning_effort = None;
+        self.refresh_status_surfaces();
         self.clear_safety_buffering();
         // Drop preview-only stream tail content on any termination path before
         // failed-cell finalization, so transient tail cells are never persisted.

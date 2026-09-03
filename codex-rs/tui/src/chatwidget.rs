@@ -567,6 +567,9 @@ pub(crate) struct ChatWidget {
     model_catalog: Arc<ModelCatalog>,
     session_telemetry: SessionTelemetry,
     session_header: SessionHeader,
+    // Settings captured at turn start, before later thread-setting updates.
+    active_turn_model: Option<String>,
+    active_turn_reasoning_effort: Option<Option<ReasoningEffortConfig>>,
     initial_user_message: Option<UserMessage>,
     status_account_display: Option<StatusAccountDisplay>,
     runtime_model_provider_base_url: Option<String>,
