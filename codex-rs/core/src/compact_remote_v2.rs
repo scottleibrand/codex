@@ -13,6 +13,7 @@ use crate::compact::compaction_status_from_result;
 use crate::compact::insert_initial_context_before_last_real_user_or_summary;
 use crate::compact_model_fallback::record_model_fallback;
 use crate::compact_model_fallback::should_retry_with_current_model;
+use codex_tools::ToolSpec;
 use crate::compact_remote_history::HistoryItemGroup;
 use crate::compact_remote_history::history_item_groups;
 use crate::context_manager::estimate_item_token_count;
@@ -75,6 +76,7 @@ enum RetainedImageBudget {
 pub(crate) const RETAINED_MESSAGE_TOKEN_BUDGET: usize = 64_000;
 const MAX_RETAINED_AGENT_MESSAGE_TOKENS: i64 = 10_000;
 const MAX_REQUIRED_POST_COMPACTION_HEADROOM_TOKENS: i64 = 64_000;
+pub(crate) const POST_COMPACTION_REQUEST_ENVELOPE_TOKENS: i64 = 8_192;
 // Compact attempts can run much longer than normal turns, so keep the per-transport
 // retry budget smaller than the general Responses stream retry budget.
 const MAX_REMOTE_COMPACTION_V2_STREAM_RETRIES: u64 = 2;
@@ -250,8 +252,8 @@ async fn run_remote_compact_task_inner_impl(
         analytics_details,
     )
     .await;
-    let (attempt, compaction_turn_context) = match attempt {
-        Ok(attempt) => (attempt, turn_context),
+    let (attempt, compaction_step_context) = match attempt {
+        Ok(attempt) => (attempt, step_context),
         Err(error) => {
             let Some(fallback_step_context) = fallback_step_context else {
                 return Err(error);
@@ -287,11 +289,12 @@ async fn run_remote_compact_task_inner_impl(
                 fallback_result.as_ref().err(),
             );
             match fallback_result {
-                Ok(attempt) => (attempt, fallback_turn_context),
+                Ok(attempt) => (attempt, fallback_step_context),
                 Err(_) => return Err(error),
             }
         }
     };
+    let compaction_turn_context = &compaction_step_context.turn;
     let RemoteCompactV2Attempt {
         trace_input_history,
         prompt_input,
@@ -326,8 +329,14 @@ async fn run_remote_compact_task_inner_impl(
     let new_history =
         insert_initial_context_before_last_real_user_or_summary(compacted_history, initial_context);
     let base_instructions = sess.get_base_instructions().await;
-    let estimated_tokens =
-        estimate_compacted_history_tokens(&new_history, base_instructions.text.as_str());
+    let estimated_tokens = estimate_compacted_history_tokens(
+        new_history.iter().map(|envelope| &envelope.item),
+        base_instructions.text.as_str(),
+        compaction_step_context
+            .tool_router
+            .model_visible_specs()
+            .as_ref(),
+    );
     if let Some((context_window, required_headroom)) = insufficient_post_compaction_headroom(
         estimated_tokens,
         compaction_turn_context.model_context_window(),
@@ -398,19 +407,23 @@ async fn run_remote_compact_task_inner_impl(
         .await;
     Ok(())
 }
-
-fn estimate_compacted_history_tokens(
-    history: &[ResponseItemEnvelope],
+pub(crate) fn estimate_compacted_history_tokens<'a>(
+    history: impl IntoIterator<Item = &'a ResponseItem>,
     base_instructions: &str,
+    tools: &[ToolSpec],
 ) -> i64 {
     let base_tokens = i64::try_from(approx_token_count(base_instructions)).unwrap_or(i64::MAX);
+    let tool_tokens = serde_json::to_string(tools)
+        .map(|tools| i64::try_from(approx_token_count(&tools)).unwrap_or(i64::MAX))
+        .unwrap_or(i64::MAX);
     history
-        .iter()
-        .map(|envelope| estimate_item_token_count(&envelope.item))
+        .into_iter()
+        .map(estimate_item_token_count)
         .fold(base_tokens, i64::saturating_add)
+        .saturating_add(tool_tokens)
+        .saturating_add(POST_COMPACTION_REQUEST_ENVELOPE_TOKENS)
 }
-
-fn insufficient_post_compaction_headroom(
+pub(crate) fn insufficient_post_compaction_headroom(
     estimated_tokens: i64,
     context_window: Option<i64>,
 ) -> Option<(i64, i64)> {
@@ -943,6 +956,19 @@ mod tests {
             None
         );
         assert_eq!(insufficient_post_compaction_headroom(1, None), None);
+    }
+
+    #[test]
+    fn compacted_history_estimate_reserves_request_and_tool_overhead() {
+        let without_tools =
+            estimate_compacted_history_tokens(std::iter::empty::<&ResponseItem>(), "", &[]);
+        let tool =
+            crate::tools::handlers::get_context_remaining_spec::create_get_context_remaining_tool();
+        let with_tools =
+            estimate_compacted_history_tokens(std::iter::empty::<&ResponseItem>(), "", &[tool]);
+
+        assert!(without_tools >= POST_COMPACTION_REQUEST_ENVELOPE_TOKENS);
+        assert!(with_tools > without_tools);
     }
 
     #[test]
