@@ -16,6 +16,10 @@ use core_test_support::test_codex::test_codex;
 use core_test_support::wait_for_event;
 use pretty_assertions::assert_eq;
 use std::net::TcpListener;
+use std::time::Duration;
+use tokio::io::AsyncReadExt;
+use tokio::io::AsyncWriteExt;
+use tokio::net::TcpListener as TokioTcpListener;
 use tokio::sync::oneshot;
 use wiremock::MockServer;
 
@@ -159,6 +163,123 @@ async fn sampling_deadline_retries_then_completes() {
 
     drop(hold_open_tx);
     server.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn retries_when_response_headers_never_arrive() {
+    skip_if_no_network!();
+
+    let listener = TokioTcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind response-header stall server");
+    let address = listener
+        .local_addr()
+        .expect("response-header stall server address");
+    let completed_sse = responses::sse_completed("resp_ok");
+    let (hold_open_tx, hold_open_rx) = oneshot::channel::<()>();
+    let (first_request_tx, first_request_rx) = oneshot::channel::<()>();
+    let (retry_request_tx, retry_request_rx) = oneshot::channel::<()>();
+    let server_task = tokio::spawn(async move {
+        let (mut stalled, _) = listener.accept().await.expect("accept stalled request");
+        let _ = first_request_tx.send(());
+        read_complete_http_request(&mut stalled).await;
+        tokio::spawn(async move {
+            let _stalled = stalled;
+            let _ = hold_open_rx.await;
+        });
+
+        let (mut retry, _) = listener.accept().await.expect("accept retry request");
+        let _ = retry_request_tx.send(());
+        read_complete_http_request(&mut retry).await;
+        let response = format!(
+            "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+            completed_sse.len(),
+            completed_sse
+        );
+        retry
+            .write_all(response.as_bytes())
+            .await
+            .expect("write completed SSE response");
+        retry.shutdown().await.expect("close retry response");
+    });
+
+    let mut model_provider = built_in_model_providers(/* openai_base_url */ None)["openai"].clone();
+    let base_url = format!("http://{address}/v1");
+    model_provider.base_url = Some(base_url.clone());
+    model_provider.env_key = None;
+    model_provider.experimental_bearer_token = None;
+    model_provider.auth = None;
+    model_provider.aws = None;
+    model_provider.request_max_retries = Some(0);
+    model_provider.stream_max_retries = Some(1);
+    model_provider.stream_idle_timeout_ms = Some(2_000);
+    model_provider.stream_setup_timeout_ms = Some(1_000);
+    model_provider.requires_openai_auth = false;
+    model_provider.supports_websockets = false;
+    let TestCodex { codex, config, .. } = test_codex()
+        .with_config(move |config| {
+            config.model_provider = model_provider;
+        })
+        .build_with_base_url(base_url)
+        .await
+        .unwrap();
+    assert_eq!(config.model_provider.stream_setup_timeout_ms, Some(1_000));
+
+    codex
+        .start_or_steer_turn(TurnInputRequest::user_input(vec![UserInput::Text {
+            text: "hello".into(),
+            text_elements: Vec::new(),
+        }]))
+        .await
+        .unwrap();
+
+    tokio::time::timeout(Duration::from_secs(5), first_request_rx)
+        .await
+        .expect("initial request was not received")
+        .expect("initial request marker dropped");
+    tokio::time::timeout(Duration::from_secs(10), retry_request_rx)
+        .await
+        .expect("pre-stream timeout did not trigger a retry")
+        .expect("retry request marker dropped");
+
+    tokio::time::timeout(
+        Duration::from_secs(5),
+        wait_for_event(&codex, |event| matches!(event, EventMsg::TurnComplete(_))),
+    )
+    .await
+    .expect("retry response did not complete the turn");
+
+    drop(hold_open_tx);
+    server_task
+        .await
+        .expect("response-header stall server task");
+}
+
+async fn read_complete_http_request(stream: &mut tokio::net::TcpStream) {
+    let mut request = Vec::new();
+    let mut scratch = [0_u8; 1024];
+    loop {
+        let count = stream.read(&mut scratch).await.expect("read HTTP request");
+        assert!(count > 0, "request closed before its body was complete");
+        request.extend_from_slice(&scratch[..count]);
+        let Some(header_end) = request.windows(4).position(|window| window == b"\r\n\r\n") else {
+            continue;
+        };
+        let body_start = header_end + 4;
+        let headers = String::from_utf8_lossy(&request[..body_start]);
+        let content_length = headers
+            .lines()
+            .find_map(|line| {
+                let (name, value) = line.split_once(':')?;
+                name.eq_ignore_ascii_case("content-length")
+                    .then(|| value.trim().parse::<usize>().ok())
+                    .flatten()
+            })
+            .unwrap_or(0);
+        if request.len() >= body_start + content_length {
+            return;
+        }
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
