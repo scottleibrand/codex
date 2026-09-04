@@ -4339,6 +4339,79 @@ async fn snapshot_request_shape_remote_pre_turn_compaction_context_window_exceed
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn remote_pre_turn_compaction_reserves_large_pending_user_input() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let harness = TestCodexHarness::with_builder(
+        test_codex()
+            .with_auth(CodexAuth::create_dummy_chatgpt_auth_for_testing())
+            .with_config(|config| {
+                config.model_auto_compact_token_limit = Some(200);
+                config.model_context_window = Some(50_000);
+            }),
+    )
+    .await?;
+    let codex = harness.test().codex.clone();
+    let compacted_summary = format!("COMPACTED_SUMMARY_{}", "s".repeat(40_000));
+    let large_pending_user_input = format!("LARGE_PENDING_INPUT_{}", "u".repeat(80_000));
+
+    let responses_mock = responses::mount_response_sequence(
+        harness.server(),
+        vec![
+            responses::sse_response(responses::sse(vec![
+                responses::ev_assistant_message("m1", "BEFORE_COMPACT_REPLY"),
+                responses::ev_completed_with_tokens("r1", /*total_tokens*/ 500),
+            ])),
+            responses::sse_response(responses::sse(vec![
+                responses::ev_assistant_message("m2", "AFTER_COMPACT_REPLY"),
+                responses::ev_completed_with_tokens("r2", /*total_tokens*/ 80),
+            ])),
+        ],
+    )
+    .await;
+    let compact_mock = responses::mount_compact_response_once(
+        harness.server(),
+        ResponseTemplate::new(200)
+            .insert_header("content-type", "application/json")
+            .set_body_json(json!({
+                "output": compacted_summary_only_output(&compacted_summary),
+            })),
+    )
+    .await;
+
+    codex
+        .start_or_steer_turn(TurnInputRequest::user_input(vec![UserInput::Text {
+            text: "BEFORE_COMPACT_USER".to_string(),
+            text_elements: Vec::new(),
+        }]))
+        .await?;
+    wait_for_turn_complete(&codex).await;
+
+    codex
+        .start_or_steer_turn(TurnInputRequest::user_input(vec![UserInput::Text {
+            text: large_pending_user_input.clone(),
+            text_elements: Vec::new(),
+        }]))
+        .await?;
+    wait_for_turn_complete(&codex).await;
+
+    assert_eq!(compact_mock.requests().len(), 1);
+    let requests = responses_mock.requests();
+    assert_eq!(requests.len(), 2);
+    let post_compact_text = requests[1].message_input_texts("user").join("\n");
+    assert!(
+        post_compact_text.contains(&large_pending_user_input),
+        "fresh context must preserve the pending user input"
+    );
+    assert!(
+        !post_compact_text.contains(&compacted_summary),
+        "compacted history that cannot fit with pending input must not be installed"
+    );
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn remote_pre_turn_compact_response_seeds_turn_state() -> Result<()> {
     skip_if_no_network!(Ok(()));
 
