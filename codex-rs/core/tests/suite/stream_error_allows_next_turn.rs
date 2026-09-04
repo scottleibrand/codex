@@ -78,6 +78,8 @@ async fn continue_after_stream_error() {
         request_max_retries: Some(1),
         stream_max_retries: Some(1),
         stream_idle_timeout_ms: Some(2_000),
+        stream_setup_timeout_ms: None,
+        sampling_timeout_ms: None,
         websocket_connect_timeout_ms: None,
         requires_openai_auth: false,
         supports_websockets: false,

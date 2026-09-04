@@ -2318,6 +2318,9 @@ async fn try_run_sampling_request(
             return Err(CodexErr::TurnAborted);
         }
     };
+    let sampling_timeout = turn_context.provider.info().sampling_timeout();
+    let sampling_deadline =
+        sampling_timeout.map(|timeout| (tokio::time::Instant::now() + timeout, timeout));
     let mut in_flight: FuturesOrdered<InFlightFuture<'static>> = FuturesOrdered::new();
     let mut needs_follow_up = false;
     let mut last_agent_message: Option<String> = None;
@@ -2363,26 +2366,42 @@ async fn try_run_sampling_request(
             codex.usage.total_tokens = field::Empty,
         );
 
-        let event = match stream
-            .next()
-            .instrument(trace_span!(parent: &handle_responses, "receiving"))
-            .or_cancel(&cancellation_token)
-            .await
-        {
-            Ok(event) => event,
-            Err(codex_async_utils::CancelErr::Cancelled) => {
-                break Err(CodexErr::TurnAborted);
+        let receive_event = async {
+            let event = match stream
+                .next()
+                .instrument(trace_span!(parent: &handle_responses, "receiving"))
+                .or_cancel(&cancellation_token)
+                .await
+            {
+                Ok(event) => event,
+                Err(codex_async_utils::CancelErr::Cancelled) => {
+                    return Err(CodexErr::TurnAborted);
+                }
+            };
+
+            match event {
+                Some(Ok(event)) => Ok(event),
+                Some(Err(err)) => Err(err),
+                None => Err(CodexErr::Stream(
+                    "stream closed before response.completed".into(),
+                )),
             }
         };
 
-        let event = match event {
-            Some(Ok(event)) => event,
-            Some(Err(err)) => break Err(err),
-            None => {
-                break Err(CodexErr::Stream(
-                    "stream closed before response.completed".into(),
-                ));
+        let event = match sampling_deadline {
+            Some((deadline, timeout)) => {
+                match tokio::time::timeout_at(deadline, receive_event).await {
+                    Ok(result) => result,
+                    Err(_) => Err(CodexErr::Stream(format!(
+                        "sampling deadline exceeded after {timeout:?}"
+                    ))),
+                }
             }
+            None => receive_event.await,
+        };
+        let event = match event {
+            Ok(event) => event,
+            Err(err) => break Err(err),
         };
 
         sess.services
