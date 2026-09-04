@@ -92,6 +92,10 @@ pub enum CodexErrorDetails {
     /// The Session loop treats this as a transient error and will automatically retry the turn.
     #[error("stream disconnected before completion: {0}")]
     Stream(String),
+    #[error(
+        "stream disconnected before completion: timeout establishing response stream after {0:?}"
+    )]
+    ResponseStreamSetupTimeout(Duration),
     /// A retryable upstream rate limit received inside the response stream.
     #[error("rate limit exceeded: {0}")]
     RateLimitExceeded(String),
@@ -329,6 +333,7 @@ impl CodexErr {
 
     codex_err_tuple_constructors!(
         Stream(message: String),
+        ResponseStreamSetupTimeout(timeout: Duration),
         ThreadNotFound(thread_id: ThreadId),
         UnexpectedStatus(error: UnexpectedResponseError),
         InvalidRequest(message: String),
@@ -395,6 +400,7 @@ impl CodexErr {
             | CodexErrorDetails::CyberPolicy { .. }
             | CodexErrorDetails::MisalignmentPolicyViolation { .. } => false,
             CodexErrorDetails::Stream(..)
+            | CodexErrorDetails::ResponseStreamSetupTimeout(_)
             | CodexErrorDetails::RateLimitExceeded(_)
             | CodexErrorDetails::Timeout
             | CodexErrorDetails::RequestTimeout

@@ -25,6 +25,7 @@ use std::num::NonZeroU64;
 use std::time::Duration;
 
 const DEFAULT_STREAM_IDLE_TIMEOUT_MS: u64 = 300_000;
+const DEFAULT_STREAM_SETUP_TIMEOUT_MS: u64 = 60_000;
 const DEFAULT_STREAM_MAX_RETRIES: u64 = 5;
 const DEFAULT_REQUEST_MAX_RETRIES: u64 = 4;
 const DEFAULT_AWS_AUTH_REFRESH_TIMEOUT_MS: u64 = 300_000;
@@ -374,6 +375,11 @@ impl ModelProviderInfo {
         self.stream_idle_timeout_ms
             .map(Duration::from_millis)
             .unwrap_or(Duration::from_millis(DEFAULT_STREAM_IDLE_TIMEOUT_MS))
+    }
+
+    /// Effective timeout for establishing a streaming response.
+    pub fn stream_setup_timeout(&self) -> Duration {
+        Duration::from_millis(DEFAULT_STREAM_SETUP_TIMEOUT_MS)
     }
 
     /// Effective timeout for websocket connect attempts.
