@@ -5541,7 +5541,7 @@ async fn oversized_remote_v2_compaction_falls_back_to_fresh_context() -> Result<
     let mut builder = test_codex()
         .with_auth(CodexAuth::create_dummy_chatgpt_auth_for_testing())
         .with_config(|config| {
-            config.model_context_window = Some(1_000);
+            config.model_context_window = Some(16_000);
             let _ = config.features.enable(Feature::RemoteCompactionV2);
         });
     let test = builder.build(&server).await?;
@@ -5567,12 +5567,12 @@ async fn oversized_remote_v2_compaction_falls_back_to_fresh_context() -> Result<
             .all(|item| item.get("type").and_then(Value::as_str) != Some("compaction")),
         "post-compaction request must not install the oversized encrypted artifact"
     );
+    let post_compact_user_texts = requests[2].message_input_texts("user");
     assert!(
-        requests[2]
-            .message_input_texts("user")
+        post_compact_user_texts
             .iter()
             .any(|text| text.contains("after oversized compaction")),
-        "fresh context should accept the next user turn"
+        "fresh context should accept the next user turn; user texts: {post_compact_user_texts:?}"
     );
 
     Ok(())
