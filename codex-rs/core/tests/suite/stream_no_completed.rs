@@ -4,6 +4,7 @@
 use codex_core::TurnInputRequest;
 use codex_model_provider_info::ModelProviderInfo;
 use codex_model_provider_info::WireApi;
+use codex_model_provider_info::built_in_model_providers;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::user_input::UserInput;
 use core_test_support::responses;
@@ -15,6 +16,7 @@ use core_test_support::test_codex::test_codex;
 use core_test_support::wait_for_event;
 use pretty_assertions::assert_eq;
 use std::net::TcpListener;
+use tokio::sync::oneshot;
 use wiremock::MockServer;
 
 fn sse_incomplete() -> String {
@@ -64,6 +66,8 @@ async fn retries_on_early_close() {
         request_max_retries: Some(0),
         stream_max_retries: Some(1),
         stream_idle_timeout_ms: Some(2000),
+        stream_setup_timeout_ms: None,
+        sampling_timeout_ms: None,
         websocket_connect_timeout_ms: None,
         requires_openai_auth: false,
         supports_websockets: false,
@@ -96,6 +100,64 @@ async fn retries_on_early_close() {
         "expected retry after incomplete SSE stream"
     );
 
+    server.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn sampling_deadline_retries_then_completes() {
+    skip_if_no_network!();
+
+    let (hold_open_tx, hold_open_rx) = oneshot::channel::<()>();
+    let (server, _) = start_streaming_sse_server(vec![
+        vec![
+            StreamingSseChunk {
+                gate: None,
+                body: responses::sse(vec![responses::ev_response_created("stalled")]),
+            },
+            StreamingSseChunk {
+                gate: Some(hold_open_rx),
+                body: responses::sse_completed("stalled"),
+            },
+        ],
+        vec![StreamingSseChunk {
+            gate: None,
+            body: responses::sse_completed("recovered"),
+        }],
+    ])
+    .await;
+
+    let mut model_provider = built_in_model_providers(/* openai_base_url */ None)["openai"].clone();
+    model_provider.base_url = Some(format!("{}/v1", server.uri()));
+    model_provider.env_key = Some("PATH".into());
+    model_provider.request_max_retries = Some(0);
+    model_provider.stream_max_retries = Some(1);
+    model_provider.sampling_timeout_ms = Some(50);
+    model_provider.supports_websockets = false;
+
+    let TestCodex { codex, .. } = test_codex()
+        .with_config(move |config| {
+            config.model_provider = model_provider;
+        })
+        .build_with_streaming_server(&server)
+        .await
+        .unwrap();
+
+    codex
+        .start_or_steer_turn(TurnInputRequest::user_input(vec![UserInput::Text {
+            text: "recover after the sampling deadline".into(),
+            text_elements: Vec::new(),
+        }]))
+        .await
+        .unwrap();
+
+    wait_for_event(&codex, |event| matches!(event, EventMsg::TurnComplete(_))).await;
+    assert_eq!(
+        server.requests().await.len(),
+        2,
+        "sampling deadline should retry through the streaming retry policy"
+    );
+
+    drop(hold_open_tx);
     server.shutdown().await;
 }
 
