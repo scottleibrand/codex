@@ -1536,7 +1536,7 @@ pub(crate) fn build_guardian_review_session_config(
         .and_then(|messages| messages.policy_template.as_deref())
         .unwrap_or(BUNDLED_GUARDIAN_POLICY_TEMPLATE);
     guardian_config.base_instructions = Some(guardian_policy_prompt_with_config_and_template(
-        tenant_policy_config,
+        tenant_policy_config.as_str(),
         policy_template,
     ));
     guardian_config.base_instructions_provenance = Some(BaseInstructionsProvenance::Custom);

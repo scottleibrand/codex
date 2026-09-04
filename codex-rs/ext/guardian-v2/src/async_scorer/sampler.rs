@@ -40,6 +40,8 @@ use codex_protocol::protocol::TokenUsage;
 use http::HeaderValue;
 use http::StatusCode;
 use serde_json::json;
+use sha2::Digest;
+use sha2::Sha256;
 use thiserror::Error;
 use tokio::sync::OwnedSemaphorePermit;
 use tokio::sync::Semaphore;
@@ -454,6 +456,7 @@ impl LunaSampler {
         let turn_id = Uuid::now_v7().to_string();
         let parent_turn_id = request.parent_turn_id;
         let root_turn_id = request.root_turn_id;
+        let policy_cache_key = format!("{:x}", Sha256::digest(request.instructions.as_bytes()));
         let mut input = vec![
             ResponseItem::AdditionalTools {
                 id: None,
@@ -546,7 +549,10 @@ impl LunaSampler {
             stream_options: None,
             include: Vec::new(),
             service_tier: None,
-            prompt_cache_key: Some(format!("guardian-v2:{}", self.config.thread_id)),
+            prompt_cache_key: Some(format!(
+                "guardian-v2:{}:{policy_cache_key}",
+                self.config.thread_id
+            )),
             text: None,
             client_metadata: None,
             access_programs: None,

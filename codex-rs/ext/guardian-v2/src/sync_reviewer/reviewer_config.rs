@@ -165,7 +165,7 @@ fn isolated_reviewer_config(
     let policy = parent_config.resolve_guardian_policy(model_messages);
     let policy_prompt = template
         .trim_end()
-        .replace(POLICY_PLACEHOLDER, policy.trim());
+        .replace(POLICY_PLACEHOLDER, policy.as_str().trim());
 
     // Preserve the parent's persistence setting so reusable reviewers can retain their rollouts.
     let mut config = parent_config.clone();

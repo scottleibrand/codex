@@ -25,6 +25,7 @@ use core_test_support::responses::ev_output_text_delta;
 use core_test_support::skip_if_no_network;
 use pretty_assertions::assert_eq;
 use serde_json::json;
+use sha2::Digest;
 use std::collections::HashSet;
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -527,7 +528,13 @@ async fn preconnected_sampler_reuses_authenticated_websocket_for_classifications
         assert_eq!(request["input"][0]["tools"], json!([]));
         assert_eq!(request["tool_choice"], "none");
         assert!(request.get("text").is_none());
-        assert_eq!(request["prompt_cache_key"], "guardian-v2:thread-1");
+        assert_eq!(
+            request["prompt_cache_key"],
+            format!(
+                "guardian-v2:thread-1:{:x}",
+                sha2::Sha256::digest(b"Return high for high risk or low for low risk.")
+            )
+        );
         assert!(request.get("tools").is_none());
         let effort = if index == 1 { "medium" } else { "none" };
         assert_eq!(request["reasoning"]["effort"], effort);
