@@ -873,11 +873,35 @@ fn commands_for_exec_policy(command: &[String]) -> ExecPolicyCommands {
     commands_for_exec_policy_for_platform(command, DangerousCommandPlatform::host())
 }
 
+const MAX_NESTED_SHELL_DEPTH: usize = 8;
+
+fn parse_nested_shell_commands(
+    command: &[String],
+    remaining_depth: usize,
+) -> Option<Vec<Vec<String>>> {
+    let commands = parse_shell_lc_plain_commands(command)?;
+    if commands.is_empty() {
+        return None;
+    }
+
+    let mut flattened = Vec::new();
+    for command in commands {
+        if remaining_depth > 0
+            && let Some(nested) = parse_nested_shell_commands(&command, remaining_depth - 1)
+        {
+            flattened.extend(nested);
+        } else {
+            flattened.push(command);
+        }
+    }
+    Some(flattened)
+}
+
 fn commands_for_exec_policy_for_platform(
     command: &[String],
     command_platform: DangerousCommandPlatform,
 ) -> ExecPolicyCommands {
-    if let Some(commands) = parse_shell_lc_plain_commands(command)
+    if let Some(commands) = parse_nested_shell_commands(command, MAX_NESTED_SHELL_DEPTH)
         && !commands.is_empty()
     {
         return ExecPolicyCommands {
