@@ -329,7 +329,11 @@ impl ExecPolicyManager {
         req: ExecApprovalRequest<'_>,
         command_platform: DangerousCommandPlatform,
     ) -> ExecApprovalRequirement {
-        let commands = commands_for_exec_policy_for_platform(req.command, command_platform);
+        let commands = commands_for_exec_policy_for_platform(
+            req.command,
+            command_platform,
+            /* cwd */ None,
+        );
         self.create_exec_approval_requirement_for_parsed_commands(req, commands, command_platform)
             .await
     }
@@ -870,7 +874,11 @@ pub(crate) fn default_policy_path(codex_home: &Path) -> PathBuf {
 
 #[cfg(test)]
 fn commands_for_exec_policy(command: &[String]) -> ExecPolicyCommands {
-    commands_for_exec_policy_for_platform(command, DangerousCommandPlatform::host())
+    commands_for_exec_policy_for_platform(
+        command,
+        DangerousCommandPlatform::host(),
+        /* cwd */ None,
+    )
 }
 
 const MAX_NESTED_SHELL_DEPTH: usize = 8;
@@ -878,6 +886,7 @@ const MAX_NESTED_SHELL_DEPTH: usize = 8;
 fn parse_nested_shell_commands(
     command: &[String],
     remaining_depth: usize,
+    cwd: Option<&Path>,
 ) -> Option<Vec<Vec<String>>> {
     let commands = parse_shell_lc_plain_commands(command)?;
     if commands.is_empty() {
@@ -885,9 +894,10 @@ fn parse_nested_shell_commands(
     }
 
     let mut flattened = Vec::new();
-    for command in commands {
+    for mut command in commands {
+        canonicalize_nested_program(&mut command, cwd);
         if remaining_depth > 0
-            && let Some(nested) = parse_nested_shell_commands(&command, remaining_depth - 1)
+            && let Some(nested) = parse_nested_shell_commands(&command, remaining_depth - 1, cwd)
         {
             flattened.extend(nested);
         } else {
@@ -897,11 +907,25 @@ fn parse_nested_shell_commands(
     Some(flattened)
 }
 
+fn canonicalize_nested_program(command: &mut [String], cwd: Option<&Path>) {
+    let (Some(program), Some(cwd)) = (command.first_mut(), cwd) else {
+        return;
+    };
+    let path = Path::new(program);
+    if path.is_absolute() || path.components().count() < 2 {
+        return;
+    }
+    if let Ok(canonical) = std::fs::canonicalize(cwd.join(path)) {
+        *program = canonical.to_string_lossy().into_owned();
+    }
+}
+
 fn commands_for_exec_policy_for_platform(
     command: &[String],
     command_platform: DangerousCommandPlatform,
+    cwd: Option<&Path>,
 ) -> ExecPolicyCommands {
-    if let Some(commands) = parse_nested_shell_commands(command, MAX_NESTED_SHELL_DEPTH)
+    if let Some(commands) = parse_nested_shell_commands(command, MAX_NESTED_SHELL_DEPTH, cwd)
         && !commands.is_empty()
     {
         return ExecPolicyCommands {
