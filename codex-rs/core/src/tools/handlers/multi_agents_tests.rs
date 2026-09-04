@@ -97,6 +97,38 @@ fn invocation(
     }
 }
 
+#[test]
+fn bedrock_spawn_model_ids_use_provider_canonical_names() {
+    assert_eq!(
+        canonicalize_bedrock_spawn_model_id(
+            codex_model_provider_info::AMAZON_BEDROCK_PROVIDER_ID,
+            "gpt-5.6-luna"
+        ),
+        "openai.gpt-5.6-luna"
+    );
+    assert_eq!(
+        canonicalize_bedrock_spawn_model_id(
+            codex_model_provider_info::AMAZON_BEDROCK_RUNTIME_PROVIDER_ID,
+            "gpt-5.6-luna"
+        ),
+        "global.openai.gpt-5.6-luna"
+    );
+    assert_eq!(
+        canonicalize_bedrock_spawn_model_id(
+            codex_model_provider_info::OPENAI_PROVIDER_ID,
+            "gpt-5.6-luna"
+        ),
+        "gpt-5.6-luna"
+    );
+    assert_eq!(
+        canonicalize_bedrock_spawn_model_id(
+            codex_model_provider_info::AMAZON_BEDROCK_PROVIDER_ID,
+            "openai.gpt-5.6-luna"
+        ),
+        "openai.gpt-5.6-luna"
+    );
+}
+
 fn function_payload(args: serde_json::Value) -> ToolPayload {
     ToolPayload::Function {
         arguments: args.to_string(),
