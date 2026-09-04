@@ -324,6 +324,7 @@ impl ExecPolicyManager {
         .await
     }
 
+    #[cfg(test)]
     async fn create_exec_approval_requirement_for_command_platform(
         &self,
         req: ExecApprovalRequest<'_>,
