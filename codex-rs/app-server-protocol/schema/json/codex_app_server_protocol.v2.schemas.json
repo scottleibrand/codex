@@ -15238,6 +15238,51 @@
         }
       ]
     },
+    "SamplingSettingsEffectiveNotification": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "properties": {
+        "attempt": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "model": {
+          "type": "string"
+        },
+        "modelProviderId": {
+          "type": "string"
+        },
+        "reasoningEffort": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/ReasoningEffort"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "rootTurnId": {
+          "type": "string"
+        },
+        "samplingRequestId": {
+          "type": "string"
+        },
+        "threadId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "attempt",
+        "model",
+        "modelProviderId",
+        "rootTurnId",
+        "samplingRequestId",
+        "threadId"
+      ],
+      "title": "SamplingSettingsEffectiveNotification",
+      "type": "object"
+    },
     "SandboxMode": {
       "enum": [
         "read-only",
@@ -16729,6 +16774,26 @@
             "params"
           ],
           "title": "Model/reroutedNotification",
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "enum": [
+                "turn/samplingSettingsEffective"
+              ],
+              "title": "Turn/samplingSettingsEffectiveNotificationMethod",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/definitions/SamplingSettingsEffectiveNotification"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "title": "Turn/samplingSettingsEffectiveNotification",
           "type": "object"
         },
         {

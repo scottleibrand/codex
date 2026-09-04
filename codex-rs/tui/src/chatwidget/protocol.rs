@@ -59,6 +59,11 @@ impl ChatWidget {
             ServerNotification::ThreadSettingsUpdated(notification) => {
                 self.on_thread_settings_updated(notification);
             }
+            ServerNotification::SamplingSettingsEffective(notification) => {
+                if replay_kind.is_none() {
+                    self.on_sampling_settings_effective(notification);
+                }
+            }
             ServerNotification::TurnStarted(notification) => {
                 if replay_kind.is_none() {
                     self.clear_misalignment_for_new_turn(&notification.turn.id);

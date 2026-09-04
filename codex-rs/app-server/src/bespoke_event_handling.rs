@@ -54,6 +54,7 @@ use codex_app_server_protocol::PermissionsRequestApprovalResponse;
 use codex_app_server_protocol::RawResponseCompletedNotification;
 use codex_app_server_protocol::RawResponseItemCompletedNotification;
 use codex_app_server_protocol::RequestId;
+use codex_app_server_protocol::SamplingSettingsEffectiveNotification;
 use codex_app_server_protocol::ServerNotification;
 use codex_app_server_protocol::ServerRequestPayload;
 use codex_app_server_protocol::StrictReviewRequiredNotification;
@@ -408,6 +409,22 @@ pub(crate) async fn apply_bespoke_event_handling(
             };
             outgoing
                 .send_server_notification(ServerNotification::ModelRerouted(notification))
+                .await;
+        }
+        EventMsg::SamplingSettingsEffective(event) => {
+            let notification = SamplingSettingsEffectiveNotification {
+                thread_id: event.thread_id.to_string(),
+                root_turn_id: event.root_turn_id,
+                sampling_request_id: event.sampling_request_id,
+                model_provider_id: event.model_provider_id,
+                model: event.model,
+                reasoning_effort: event.reasoning_effort,
+                attempt: event.attempt,
+            };
+            outgoing
+                .send_server_notification(ServerNotification::SamplingSettingsEffective(
+                    notification,
+                ))
                 .await;
         }
         EventMsg::ModelVerification(event) => {

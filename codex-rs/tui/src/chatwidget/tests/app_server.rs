@@ -66,6 +66,25 @@ fn configured_thread_session(thread_id: ThreadId) -> crate::session_state::Threa
     }
 }
 
+fn effective_sampling_settings(
+    thread_id: ThreadId,
+    turn_id: &str,
+    request_id: &str,
+    model: &str,
+    effort: Option<ReasoningEffortConfig>,
+    attempt: u64,
+) -> SamplingSettingsEffectiveNotification {
+    SamplingSettingsEffectiveNotification {
+        thread_id: thread_id.to_string(),
+        root_turn_id: turn_id.to_string(),
+        sampling_request_id: request_id.to_string(),
+        model_provider_id: "openai".to_string(),
+        model: model.to_string(),
+        reasoning_effort: effort,
+        attempt,
+    }
+}
+
 fn start_safety_buffering_test_turn(
     chat: &mut ChatWidget,
     op_rx: &mut tokio::sync::mpsc::UnboundedReceiver<Op>,
@@ -530,6 +549,66 @@ async fn thread_settings_updated_updates_visible_state_without_transcript() {
     );
 
     assert_eq!(chat.current_model(), "gpt-5.4");
+}
+
+#[tokio::test]
+async fn effective_sampling_notification_switches_active_model_once() {
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(Some("gpt-5.2")).await;
+    let thread_id = ThreadId::new();
+    chat.handle_thread_session(configured_thread_session(thread_id));
+    handle_turn_started(&mut chat, "turn-1");
+
+    chat.handle_server_notification(
+        ServerNotification::SamplingSettingsEffective(effective_sampling_settings(
+            thread_id,
+            "turn-1",
+            "request-1",
+            "gpt-5.2",
+            Some(ReasoningEffortConfig::Medium),
+            0,
+        )),
+        /*replay_kind*/ None,
+    );
+    assert_eq!(chat.effective_sampling_model(), "gpt-5.2");
+    let _ = drain_insert_history(&mut rx);
+
+    chat.set_model("gpt-5.4");
+    assert_eq!(chat.current_model(), "gpt-5.4");
+    assert_eq!(chat.effective_sampling_model(), "gpt-5.2");
+
+    chat.handle_server_notification(
+        ServerNotification::SamplingSettingsEffective(effective_sampling_settings(
+            thread_id,
+            "turn-1",
+            "request-1",
+            "gpt-5.2",
+            Some(ReasoningEffortConfig::Medium),
+            1,
+        )),
+        /*replay_kind*/ None,
+    );
+    assert!(
+        drain_insert_history(&mut rx).is_empty(),
+        "retrying one captured request should not repeat an active-model transition"
+    );
+
+    chat.handle_server_notification(
+        ServerNotification::SamplingSettingsEffective(effective_sampling_settings(
+            thread_id,
+            "turn-1",
+            "request-2",
+            "gpt-5.4",
+            Some(ReasoningEffortConfig::High),
+            0,
+        )),
+        /*replay_kind*/ None,
+    );
+    assert_eq!(chat.effective_sampling_model(), "gpt-5.4");
+    let rendered = drain_insert_history(&mut rx)
+        .into_iter()
+        .map(|lines| lines_to_single_string(&lines))
+        .collect::<String>();
+    assert!(rendered.contains("Active model changed to gpt-5.4 high"));
 }
 
 #[tokio::test]

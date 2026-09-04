@@ -81,11 +81,21 @@ struct StatusRateLimitState {
 pub(crate) struct StatusHistoryHandle {
     rate_limit_state: Arc<RwLock<StatusRateLimitState>>,
     thread_usage: StatusThreadUsage,
+    selected_model: Arc<RwLock<Option<(String, Vec<String>)>>>,
 }
 
 impl StatusHistoryHandle {
     pub(crate) fn reserve_thread_usage_label_width(&self) {
         self.thread_usage.reserve_label_width();
+    }
+
+    pub(crate) fn set_selected_model(&self, model: String, details: Vec<String>) {
+        #[expect(clippy::expect_used)]
+        let mut selected_model = self
+            .selected_model
+            .write()
+            .expect("status history selected-model state poisoned");
+        *selected_model = Some((model, details));
     }
 
     pub(crate) fn finish_rate_limit_refresh(
@@ -119,6 +129,7 @@ impl StatusHistoryHandle {
 struct StatusHistoryCell {
     model_name: String,
     model_details: Vec<String>,
+    selected_model: Arc<RwLock<Option<(String, Vec<String>)>>>,
     directory: PathBuf,
     permissions: String,
     agents_summary: Arc<RwLock<String>>,
@@ -369,11 +380,13 @@ impl StatusHistoryCell {
         }));
         let agents_summary = Arc::new(RwLock::new(agents_summary));
         let thread_usage = StatusThreadUsage::default();
+        let selected_model = Arc::new(RwLock::new(None));
 
         (
             Self {
                 model_name,
                 model_details,
+                selected_model: selected_model.clone(),
                 directory: config.cwd.to_path_buf(),
                 permissions,
                 collaboration_mode: collaboration_mode.map(ToString::to_string),
@@ -392,6 +405,7 @@ impl StatusHistoryCell {
             StatusHistoryHandle {
                 rate_limit_state,
                 thread_usage,
+                selected_model,
             },
         )
     }
@@ -753,8 +767,20 @@ impl HistoryCell for StatusHistoryCell {
             }
         });
 
-        let mut labels: Vec<String> = vec!["Model", "Directory", "Permissions", "Agents.md"]
+        #[expect(clippy::expect_used)]
+        let selected_model = self
+            .selected_model
+            .read()
+            .expect("status history selected-model state poisoned")
+            .clone();
+        let model_labels = if selected_model.is_some() {
+            vec!["Effective model", "Selected model"]
+        } else {
+            vec!["Model"]
+        };
+        let mut labels: Vec<String> = model_labels
             .into_iter()
+            .chain(["Directory", "Permissions", "Agents.md"])
             .map(str::to_string)
             .collect();
         let mut seen: BTreeSet<String> = labels.iter().cloned().collect();
@@ -836,16 +862,33 @@ impl HistoryCell for StatusHistoryCell {
             lines.push(Line::from(Vec::<Span<'static>>::new()));
         }
 
-        let mut model_spans = vec![Span::from(self.model_name.clone())];
-        if !self.model_details.is_empty() {
-            model_spans.push(Span::from(" (").dim());
-            model_spans.push(Span::from(self.model_details.join(", ")).dim());
-            model_spans.push(Span::from(")").dim());
-        }
+        let model_spans = |name: String, details: Vec<String>| {
+            let mut spans = vec![Span::from(name)];
+            if !details.is_empty() {
+                spans.push(Span::from(" (").dim());
+                spans.push(Span::from(details.join(", ")).dim());
+                spans.push(Span::from(")").dim());
+            }
+            spans
+        };
 
         let directory_value = format_directory_display(&self.directory, Some(value_width));
 
-        lines.push(formatter.line("Model", model_spans));
+        if let Some((selected_name, selected_details)) = selected_model {
+            lines.push(formatter.line(
+                "Effective model",
+                model_spans(self.model_name.clone(), self.model_details.clone()),
+            ));
+            lines.push(formatter.line(
+                "Selected model",
+                model_spans(selected_name, selected_details),
+            ));
+        } else {
+            lines.push(formatter.line(
+                "Model",
+                model_spans(self.model_name.clone(), self.model_details.clone()),
+            ));
+        }
         if let Some(model_provider) = self.model_provider.as_ref() {
             lines.push(formatter.line("Model provider", vec![Span::from(model_provider.clone())]));
         }

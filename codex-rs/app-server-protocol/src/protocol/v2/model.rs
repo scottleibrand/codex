@@ -165,6 +165,19 @@ pub struct ModelReroutedNotification {
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export_to = "v2/")]
+pub struct SamplingSettingsEffectiveNotification {
+    pub thread_id: String,
+    pub root_turn_id: String,
+    pub sampling_request_id: String,
+    pub model_provider_id: String,
+    pub model: String,
+    pub reasoning_effort: Option<ReasoningEffort>,
+    pub attempt: u64,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
 pub struct ModelVerificationNotification {
     pub thread_id: String,
     pub turn_id: String,
