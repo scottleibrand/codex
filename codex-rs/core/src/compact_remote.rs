@@ -40,6 +40,7 @@ use codex_protocol::models::ResponseItem;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::TurnStartedEvent;
 use codex_rollout_trace::CompactionCheckpointTracePayload;
+use codex_tools::ToolSpec;
 use codex_utils_output_truncation::approx_token_count;
 use tokio_util::sync::CancellationToken;
 
@@ -50,6 +51,8 @@ use request::run_remote_compact_attempt;
 
 const CONTEXT_WINDOW_TRUNCATED_OUTPUT_MESSAGE: &str =
     "Output exceeded the available model context and was truncated";
+const MAX_REQUIRED_POST_COMPACTION_HEADROOM_TOKENS: i64 = 64_000;
+pub(crate) const POST_COMPACTION_REQUEST_ENVELOPE_TOKENS: i64 = 8_192;
 
 pub(crate) fn remote_compact_error_is_context_overflow(error: &CodexErr) -> bool {
     if matches!(error.details(), CodexErrorDetails::ContextWindowExceeded) {
@@ -252,8 +255,8 @@ async fn run_remote_compact_task_inner_impl(
         analytics_details,
     )
     .await;
-    let (attempt, compaction_turn_context) = match attempt {
-        Ok(attempt) => (attempt, turn_context),
+    let (attempt, compaction_step_context) = match attempt {
+        Ok(attempt) => (attempt, step_context),
         Err(error) => {
             if remote_compact_error_is_context_overflow(&error) {
                 return recover_from_remote_compact_context_overflow(
@@ -299,11 +302,12 @@ async fn run_remote_compact_task_inner_impl(
                 fallback_result.as_ref().err(),
             );
             match fallback_result {
-                Ok(attempt) => (attempt, fallback_turn_context),
+                Ok(attempt) => (attempt, fallback_step_context),
                 Err(_) => return Err(error),
             }
         }
     };
+    let compaction_turn_context = &compaction_step_context.turn;
     let RemoteCompactAttempt {
         new_history,
         trace_input_history,
@@ -311,6 +315,49 @@ async fn run_remote_compact_task_inner_impl(
     let (new_window_number, new_window_ids) = sess.advance_auto_compact_window().await;
     let (new_history, world_state_baseline) =
         process_compacted_history(sess.as_ref(), new_history, &initial_context_injection).await;
+    let base_instructions = sess.get_base_instructions().await;
+    let estimated_tokens = estimate_compacted_history_tokens(
+        new_history.iter(),
+        base_instructions.text.as_str(),
+        compaction_step_context
+            .tool_router
+            .model_visible_specs()
+            .as_ref(),
+    );
+    if let Some((context_window, required_headroom)) = insufficient_post_compaction_headroom(
+        estimated_tokens,
+        compaction_turn_context.model_context_window(),
+    ) {
+        warn!(
+            turn_id = %compaction_turn_context.sub_id,
+            estimated_tokens,
+            context_window,
+            required_headroom,
+            "remote compaction left insufficient context headroom; starting a fresh context window"
+        );
+        let world_state = match world_state_baseline {
+            Some(world_state) => world_state,
+            None => Arc::new(sess.build_world_state_for_step(step_context).await?),
+        };
+        sess.start_new_context_window(step_context, world_state)
+            .await;
+        if let Some(trace_input_history) = trace_input_history.as_deref() {
+            let replacement_history = sess
+                .clone_history()
+                .await
+                .into_annotated_items()
+                .into_iter()
+                .map(ResponseItemEnvelope::into_item)
+                .collect::<Vec<_>>();
+            compaction_trace.record_installed(&CompactionCheckpointTracePayload {
+                input_history: trace_input_history,
+                replacement_history: &replacement_history,
+            });
+        }
+        sess.emit_turn_item_completed(compaction_turn_context, compaction_item)
+            .await;
+        return Ok(());
+    }
 
     let reference_context_item = match initial_context_injection {
         InitialContextInjection::DoNotInject => None,
@@ -351,6 +398,34 @@ async fn run_remote_compact_task_inner_impl(
     sess.emit_turn_item_completed(compaction_turn_context, compaction_item)
         .await;
     Ok(())
+}
+
+pub(crate) fn estimate_compacted_history_tokens<'a>(
+    history: impl IntoIterator<Item = &'a ResponseItem>,
+    base_instructions: &str,
+    tools: &[ToolSpec],
+) -> i64 {
+    let base_tokens = i64::try_from(approx_token_count(base_instructions)).unwrap_or(i64::MAX);
+    let tool_tokens = serde_json::to_string(tools)
+        .map(|tools| i64::try_from(approx_token_count(&tools)).unwrap_or(i64::MAX))
+        .unwrap_or(i64::MAX);
+    history
+        .into_iter()
+        .map(estimate_item_token_count)
+        .fold(base_tokens, i64::saturating_add)
+        .saturating_add(tool_tokens)
+        .saturating_add(POST_COMPACTION_REQUEST_ENVELOPE_TOKENS)
+}
+
+pub(crate) fn insufficient_post_compaction_headroom(
+    estimated_tokens: i64,
+    context_window: Option<i64>,
+) -> Option<(i64, i64)> {
+    let context_window = context_window?;
+    let required_headroom =
+        (context_window / 4).clamp(1, MAX_REQUIRED_POST_COMPACTION_HEADROOM_TOKENS);
+    (estimated_tokens > context_window.saturating_sub(required_headroom))
+        .then_some((context_window, required_headroom))
 }
 
 pub(crate) async fn process_compacted_history(
