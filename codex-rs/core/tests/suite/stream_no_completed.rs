@@ -154,11 +154,35 @@ async fn sampling_deadline_retries_then_completes() {
         .await
         .unwrap();
 
-    wait_for_event(&codex, |event| matches!(event, EventMsg::TurnComplete(_))).await;
+    let mut effective_settings = Vec::new();
+    loop {
+        match codex
+            .next_event()
+            .await
+            .expect("event stream should remain open")
+            .msg
+        {
+            EventMsg::SamplingSettingsEffective(event) => effective_settings.push(event),
+            EventMsg::TurnComplete(_) => break,
+            _ => {}
+        }
+    }
     assert_eq!(
         server.requests().await.len(),
         2,
         "sampling deadline should retry through the streaming retry policy"
+    );
+    assert_eq!(effective_settings.len(), 2);
+    assert_eq!(effective_settings[0].attempt, 0);
+    assert_eq!(effective_settings[1].attempt, 1);
+    assert_eq!(
+        effective_settings[0].sampling_request_id, effective_settings[1].sampling_request_id,
+        "transport retries should retain one captured sampling request identity"
+    );
+    assert_eq!(effective_settings[0].model, effective_settings[1].model);
+    assert_eq!(
+        effective_settings[0].reasoning_effort,
+        effective_settings[1].reasoning_effort
     );
 
     drop(hold_open_tx);

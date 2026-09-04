@@ -1,0 +1,52 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "definitions": {
+    "ReasoningEffort": {
+      "description": "A non-empty reasoning effort value advertised by the model.",
+      "minLength": 1,
+      "type": "string"
+    }
+  },
+  "properties": {
+    "attempt": {
+      "format": "uint64",
+      "minimum": 0.0,
+      "type": "integer"
+    },
+    "model": {
+      "type": "string"
+    },
+    "modelProviderId": {
+      "type": "string"
+    },
+    "reasoningEffort": {
+      "anyOf": [
+        {
+          "$ref": "#/definitions/ReasoningEffort"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "rootTurnId": {
+      "type": "string"
+    },
+    "samplingRequestId": {
+      "type": "string"
+    },
+    "threadId": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "attempt",
+    "model",
+    "modelProviderId",
+    "rootTurnId",
+    "samplingRequestId",
+    "threadId"
+  ],
+  "title": "SamplingSettingsEffectiveNotification",
+  "type": "object"
+}
