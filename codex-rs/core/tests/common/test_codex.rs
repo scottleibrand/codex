@@ -553,6 +553,25 @@ impl TestCodexBuilder {
         .await
     }
 
+    pub async fn build_with_base_url(
+        &mut self,
+        base_url: String,
+    ) -> anyhow::Result<TestCodex> {
+        let home = match self.home.clone() {
+            Some(home) => home,
+            None => Arc::new(TempDir::new()?),
+        };
+        let test_env = TestEnv::local().await?;
+        Box::pin(self.build_with_home_and_base_url(
+            base_url,
+            home,
+            /*resume_from*/ None,
+            test_env,
+            /*include_local_environment*/ false,
+        ))
+        .await
+    }
+
     pub async fn build_with_websocket_server(
         &mut self,
         server: &WebSocketTestServer,
