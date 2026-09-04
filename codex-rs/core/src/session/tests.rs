@@ -11341,8 +11341,11 @@ async fn legacy_compaction_retains_only_the_selected_step(first_attempt: FirstAt
         Some(Arc::clone(&fallback)),
         Arc::new(OnceLock::new()),
         InitialContextInjection::DoNotInject,
-        CompactionReason::ModelDownshift,
-        CompactionPhase::PreTurn,
+        crate::responses_metadata::AutoCompactionMetadata::new(
+            CompactionReason::ModelDownshift,
+            CompactionPhase::PreTurn,
+            /*post_compaction_input_tokens*/ 0,
+        ),
     )
     .await
     .expect("compaction succeeds");
