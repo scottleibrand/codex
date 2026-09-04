@@ -711,16 +711,14 @@ async fn remote_compact_v2_reuses_compaction_trigger_for_followups() -> Result<(
     skip_if_no_network!(Ok(()));
 
     let harness = TestCodexHarness::with_builder(
-        amazon_bedrock_test_codex()
-            .with_model_info_override(AMAZON_BEDROCK_GPT_5_5_MODEL_ID, |model_info| {
-                model_info.input_modalities.push(InputModality::Image);
-            })
+        test_codex()
+            .with_auth(CodexAuth::create_dummy_chatgpt_auth_for_testing())
             .with_config(|config| {
                 let _ = config.features.enable(Feature::RemoteCompactionV2);
             }),
     )
     .await?;
-    let image_url = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/iZk9HQAAAABJRU5ErkJggg==";
+    let image_url = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR4nGNgYAAAAAMAASsJTYQAAAAASUVORK5CYII=";
     let user_notice = "<image_resize_notice>retained user image</image_resize_notice>";
     let tool_notice = "<image_resize_notice>discarded tool image</image_resize_notice>";
     let unlisted_notice = "<unlisted_notice>discarded developer notice</unlisted_notice>";
@@ -806,16 +804,10 @@ async fn remote_compact_v2_reuses_compaction_trigger_for_followups() -> Result<(
     .await;
 
     codex
-        .start_or_steer_turn(TurnInputRequest::user_input(vec![
-            UserInput::Text {
-                text: "hello remote compact".into(),
-                text_elements: Vec::new(),
-            },
-            UserInput::Image {
-                image_url: image_url.to_string(),
-                detail: None,
-            },
-        ]))
+        .start_or_steer_turn(TurnInputRequest::user_input(vec![UserInput::Text {
+            text: "hello remote compact".into(),
+            text_elements: Vec::new(),
+        }]))
         .await?;
     wait_for_turn_complete(&codex).await;
 
@@ -887,13 +879,6 @@ async fn remote_compact_v2_reuses_compaction_trigger_for_followups() -> Result<(
     wait_for_turn_complete(&codex).await;
 
     let response_requests = responses_mock.requests();
-    assert!(
-        response_requests[0]
-            .message_input_image_urls("user")
-            .iter()
-            .any(|url| url == image_url),
-        "expected the initial model request to receive the submitted image"
-    );
     let compact_request = &response_requests[3];
     let item_create_time = |request: &responses::ResponsesRequest, text: &str| {
         request
@@ -995,14 +980,6 @@ async fn remote_compact_v2_reuses_compaction_trigger_for_followups() -> Result<(
         !compact_body.contains("ENCRYPTED_CONTEXT_COMPACTION_SUMMARY"),
         "expected v2 compaction trigger item to omit encrypted_content"
     );
-    assert!(
-        compact_request
-            .message_input_image_urls("user")
-            .iter()
-            .any(|url| url == image_url),
-        "expected the first v2 compaction request to inspect the current image"
-    );
-
     let follow_up_request = response_requests.last().expect("follow-up request missing");
     assert_eq!(
         item_create_time(follow_up_request, "hello remote compact"),
@@ -1062,16 +1039,6 @@ async fn remote_compact_v2_reuses_compaction_trigger_for_followups() -> Result<(
         "expected v2 follow-up request to preserve retained original user messages"
     );
     assert!(
-        follow_up_request
-            .message_input_image_urls("user")
-            .is_empty(),
-        "expected v2 follow-up request to omit retained image bytes"
-    );
-    assert!(
-        follow_up_body.contains("[Image omitted after compaction]"),
-        "expected v2 follow-up request to preserve an image omission marker"
-    );
-    assert!(
         follow_up_request.input().windows(2).any(|items| {
             items[0]["role"] == "user"
                 && items[0]["content"][0]["text"] == "retained image source"
@@ -1087,6 +1054,104 @@ async fn remote_compact_v2_reuses_compaction_trigger_for_followups() -> Result<(
     assert!(
         !follow_up_body.contains(tool_notice),
         "expected v2 compaction to drop the resize notice with its tool output"
+    );
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn bedrock_remote_compact_v2_omits_stale_images_from_followups() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let harness = TestCodexHarness::with_builder(
+        amazon_bedrock_test_codex()
+            .with_model_info_override("gpt-5.5", |model_info| {
+                model_info.input_modalities.push(InputModality::Image);
+            })
+            .with_model(AMAZON_BEDROCK_GPT_5_5_MODEL_ID)
+            .with_config(|config| {
+                let _ = config.features.enable(Feature::RemoteCompactionV2);
+            }),
+    )
+    .await?;
+    let codex = harness.test().codex.clone();
+    let image_url = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/iZk9HQAAAABJRU5ErkJggg==";
+    let responses_mock = responses::mount_sse_sequence(
+        harness.server(),
+        vec![
+            responses::sse(vec![
+                responses::ev_assistant_message("m1", "FIRST_REMOTE_REPLY"),
+                responses::ev_completed("resp-1"),
+            ]),
+            responses::sse(vec![
+                serde_json::json!({
+                    "type": "response.output_item.done",
+                    "item": {
+                        "type": "compaction",
+                        "encrypted_content": "ENCRYPTED_CONTEXT_COMPACTION_SUMMARY",
+                    }
+                }),
+                responses::ev_completed("resp-compact"),
+            ]),
+            responses::sse(vec![
+                responses::ev_assistant_message("m2", "AFTER_COMPACT_REPLY"),
+                responses::ev_completed("resp-2"),
+            ]),
+        ],
+    )
+    .await;
+
+    codex
+        .start_or_steer_turn(TurnInputRequest::user_input(vec![
+            UserInput::Text {
+                text: "inspect this image".into(),
+                text_elements: Vec::new(),
+            },
+            UserInput::Image {
+                image_url: image_url.to_string(),
+                detail: None,
+            },
+        ]))
+        .await?;
+    wait_for_turn_complete(&codex).await;
+
+    codex.submit(Op::Compact).await?;
+    wait_for_turn_complete(&codex).await;
+
+    codex
+        .start_or_steer_turn(TurnInputRequest::user_input(vec![UserInput::Text {
+            text: "continue after compact".into(),
+            text_elements: Vec::new(),
+        }]))
+        .await?;
+    wait_for_turn_complete(&codex).await;
+
+    let requests = responses_mock.requests();
+    assert_eq!(requests.len(), 3);
+    assert!(
+        requests[0]
+            .message_input_image_urls("user")
+            .iter()
+            .any(|url| url == image_url),
+        "initial Bedrock request should receive the submitted image"
+    );
+    assert!(
+        requests[1]
+            .message_input_image_urls("user")
+            .iter()
+            .any(|url| url == image_url),
+        "Bedrock compaction request should inspect the current image"
+    );
+    assert!(
+        requests[2].message_input_image_urls("user").is_empty(),
+        "post-compaction Bedrock request should omit stale image bytes"
+    );
+    assert!(
+        requests[2]
+            .body_json()
+            .to_string()
+            .contains("[Image omitted after compaction]"),
+        "post-compaction Bedrock request should retain an omission marker"
     );
 
     Ok(())
