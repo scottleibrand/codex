@@ -104,7 +104,9 @@ use codex_protocol::protocol::PlanDeltaEvent;
 use codex_protocol::protocol::ReasoningContentDeltaEvent;
 use codex_protocol::protocol::ReasoningRawContentDeltaEvent;
 use codex_protocol::protocol::SafetyBufferingEvent;
+use codex_protocol::protocol::SamplingSettingsEffectiveEvent;
 use codex_protocol::protocol::SessionSource;
+use codex_protocol::protocol::ThreadSource;
 use codex_protocol::protocol::TurnDiffEvent;
 use codex_protocol::protocol::WarningEvent;
 use codex_protocol::user_input::UserInput;
@@ -137,8 +139,13 @@ use tracing::instrument;
 use tracing::trace;
 use tracing::trace_span;
 use tracing::warn;
+use uuid::Uuid;
 
 const POST_SAMPLING_TOKEN_ESTIMATE_TARGET: &str = "codex_core::post_sampling_token_estimate";
+
+fn should_emit_sampling_settings_effective(thread_source: Option<&ThreadSource>) -> bool {
+    matches!(thread_source, None | Some(ThreadSource::User))
+}
 
 /// Explicit MCP startup requirements retained across restarts within one user turn.
 #[derive(Default)]
@@ -1552,6 +1559,8 @@ async fn run_sampling_request(
     let mut initial_input = Some(input);
     let mut original_input = None;
     let mut executed_tool_calls_by_output = HashMap::new();
+    let sampling_request_id = Uuid::new_v4().to_string();
+    let mut sampling_attempt = 0_u64;
     loop {
         // A retry must not attribute the next tool call to the previous response.
         turn_context
@@ -1592,6 +1601,8 @@ async fn run_sampling_request(
             Arc::clone(&turn_diff_tracker),
             &prompt,
             cancellation_token.child_token(),
+            &sampling_request_id,
+            sampling_attempt,
         )
         .await
         {
@@ -1632,6 +1643,7 @@ async fn run_sampling_request(
             ResponsesStreamRequest::Sampling,
         )
         .await?;
+        sampling_attempt = sampling_attempt.saturating_add(1);
         turn_context.turn_timing_state.record_sampling_retry();
     }
 }
@@ -1991,6 +2003,7 @@ pub(super) fn realtime_text_for_event(msg: &EventMsg) -> Option<(String, Option<
         | EventMsg::RealtimeConversationRealtime(_)
         | EventMsg::RealtimeConversationClosed(_)
         | EventMsg::ModelReroute(_)
+        | EventMsg::SamplingSettingsEffective(_)
         | EventMsg::ModelVerification(_)
         | EventMsg::TurnModerationMetadata(_)
         | EventMsg::SafetyBuffering(_)
@@ -2404,6 +2417,8 @@ async fn try_run_sampling_request(
     turn_diff_tracker: SharedTurnDiffTracker,
     prompt: &Prompt,
     cancellation_token: CancellationToken,
+    sampling_request_id: &str,
+    sampling_attempt: u64,
 ) -> CodexResult<SamplingRequestResult> {
     let turn_context = Arc::clone(&step_context.turn);
     feedback_tags!(
@@ -2425,6 +2440,24 @@ async fn try_run_sampling_request(
         .features
         .enabled(Feature::ConcurrentReasoningSummaries)
         && turn_context.provider.info().is_openai();
+    if should_emit_sampling_settings_effective(responses_metadata.thread_source.as_ref()) {
+        sess.send_event(
+            &turn_context,
+            EventMsg::SamplingSettingsEffective(SamplingSettingsEffectiveEvent {
+                thread_id: sess.thread_id(),
+                root_turn_id: responses_metadata
+                    .root_turn_id
+                    .clone()
+                    .unwrap_or_else(|| turn_context.sub_id.clone()),
+                sampling_request_id: sampling_request_id.to_string(),
+                model_provider_id: turn_context.config.model_provider_id.clone(),
+                model: step_context.settings.model_info.slug.clone(),
+                reasoning_effort: step_context.settings.reasoning_effort().cloned(),
+                attempt: sampling_attempt,
+            }),
+        )
+        .await;
+    }
     let stream_setup = client_session
         .stream(
             prompt,

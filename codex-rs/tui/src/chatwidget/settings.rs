@@ -411,6 +411,58 @@ impl ChatWidget {
         self.apply_thread_settings(notification.thread_settings);
     }
 
+    pub(crate) fn on_sampling_settings_effective(
+        &mut self,
+        notification: SamplingSettingsEffectiveNotification,
+    ) {
+        let Ok(thread_id) = ThreadId::from_string(&notification.thread_id) else {
+            tracing::warn!(
+                thread_id = notification.thread_id,
+                "ignoring effective sampling settings with invalid thread_id"
+            );
+            return;
+        };
+        if self.thread_id != Some(thread_id)
+            || self.turn_lifecycle.last_turn_id.as_deref()
+                != Some(notification.root_turn_id.as_str())
+        {
+            return;
+        }
+        if self.effective_sampling_request_id.as_deref()
+            == Some(notification.sampling_request_id.as_str())
+            && notification.attempt > 0
+        {
+            return;
+        }
+
+        let previous = self
+            .effective_sampling_model
+            .clone()
+            .zip(self.effective_sampling_reasoning_effort.clone());
+        let next = (
+            notification.model.clone(),
+            notification.reasoning_effort.clone(),
+        );
+        self.effective_sampling_model = Some(notification.model);
+        self.effective_sampling_reasoning_effort = Some(notification.reasoning_effort);
+        self.effective_sampling_request_id = Some(notification.sampling_request_id);
+        self.refresh_status_surfaces();
+
+        if previous.as_ref().is_some_and(|previous| previous != &next) {
+            let mut message = format!("Active model changed to {}", next.0);
+            if !next.0.starts_with("codex-auto-") {
+                message.push(' ');
+                message.push_str(
+                    next.1
+                        .as_ref()
+                        .map(ReasoningEffortConfig::as_str)
+                        .unwrap_or("default"),
+                );
+            }
+            self.add_info_message(message, /*hint*/ None);
+        }
+    }
+
     #[cfg(test)]
     pub(crate) fn active_collaboration_mode_kind(&self) -> ModeKind {
         self.active_mode_kind()
@@ -588,6 +640,36 @@ impl ChatWidget {
 
     pub(super) fn model_display_name(&self) -> &str {
         let model = self.current_model();
+        Self::display_name_for_model(model)
+    }
+
+    pub(super) fn effective_sampling_model(&self) -> &str {
+        self.effective_sampling_model
+            .as_deref()
+            .filter(|_| self.turn_lifecycle.agent_turn_running)
+            .unwrap_or_else(|| self.current_model())
+    }
+
+    pub(super) fn effective_sampling_model_display_name(&self) -> &str {
+        Self::display_name_for_model(self.effective_sampling_model())
+    }
+
+    pub(super) fn effective_sampling_reasoning_effort(&self) -> Option<ReasoningEffortConfig> {
+        self.effective_sampling_reasoning_effort
+            .clone()
+            .filter(|_| self.turn_lifecycle.agent_turn_running)
+            .unwrap_or_else(|| self.effective_reasoning_effort())
+    }
+
+    pub(crate) fn model_change_message_prefix(&self) -> &'static str {
+        if self.turn_lifecycle.agent_turn_running {
+            "Model change queued:"
+        } else {
+            "Model changed to"
+        }
+    }
+
+    fn display_name_for_model(model: &str) -> &str {
         if model.is_empty() {
             DEFAULT_MODEL_DISPLAY_NAME
         } else {
@@ -713,7 +795,7 @@ impl ChatWidget {
         if previous_mode != next_mode
             && (previous_model != next_model || previous_effort != next_effort)
         {
-            let mut message = format!("Model changed to {next_model}");
+            let mut message = format!("{} {next_model}", self.model_change_message_prefix());
             if !next_model.starts_with("codex-auto-") {
                 let reasoning_label = match next_effort.as_ref() {
                     None | Some(ReasoningEffortConfig::None) => "default",

@@ -1393,6 +1393,9 @@ pub enum EventMsg {
     /// Model routing changed from the requested model to a different model.
     ModelReroute(ModelRerouteEvent),
 
+    /// A root-turn sampling request is about to use its captured model settings.
+    SamplingSettingsEffective(SamplingSettingsEffectiveEvent),
+
     /// Backend recommends additional account verification for this turn.
     ModelVerification(ModelVerificationEvent),
 
@@ -2114,6 +2117,17 @@ pub struct ModelRerouteEvent {
     pub from_model: String,
     pub to_model: String,
     pub reason: ModelRerouteReason,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, JsonSchema, TS)]
+pub struct SamplingSettingsEffectiveEvent {
+    pub thread_id: ThreadId,
+    pub root_turn_id: String,
+    pub sampling_request_id: String,
+    pub model_provider_id: String,
+    pub model: String,
+    pub reasoning_effort: Option<ReasoningEffortConfig>,
+    pub attempt: u64,
 }
 
 #[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq, JsonSchema, TS)]

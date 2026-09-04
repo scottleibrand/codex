@@ -108,6 +108,39 @@ async fn status_command_uses_catalog_default_reasoning_when_config_empty() {
 }
 
 #[tokio::test]
+async fn status_command_distinguishes_selected_and_effective_models() {
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(Some("gpt-5.2")).await;
+    let thread_id = ThreadId::new();
+    chat.thread_id = Some(thread_id);
+    handle_turn_started(&mut chat, "turn-1");
+    chat.handle_server_notification(
+        ServerNotification::SamplingSettingsEffective(SamplingSettingsEffectiveNotification {
+            thread_id: thread_id.to_string(),
+            root_turn_id: "turn-1".to_string(),
+            sampling_request_id: "request-1".to_string(),
+            model_provider_id: "openai".to_string(),
+            model: "gpt-5.2".to_string(),
+            reasoning_effort: Some(ReasoningEffortConfig::Medium),
+            attempt: 0,
+        }),
+        /*replay_kind*/ None,
+    );
+    chat.set_model("gpt-5.4");
+    let _ = drain_insert_history(&mut rx);
+
+    chat.dispatch_command(SlashCommand::Status);
+
+    let rendered = drain_insert_history(&mut rx)
+        .into_iter()
+        .map(|lines| lines_to_single_string(&lines))
+        .collect::<String>();
+    assert!(rendered.contains("Effective model:"));
+    assert!(rendered.contains("gpt-5.2"));
+    assert!(rendered.contains("Selected model:"));
+    assert!(rendered.contains("gpt-5.4"));
+}
+
+#[tokio::test]
 async fn status_command_renders_native_and_foreign_instruction_sources() {
     let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
     let (foreign_source, foreign_display) = if cfg!(windows) {
