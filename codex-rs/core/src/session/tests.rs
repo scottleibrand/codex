@@ -11418,8 +11418,11 @@ async fn remote_compaction_v2_retains_only_the_selected_step(first_attempt: Firs
         Some(Arc::clone(&fallback)),
         &mut client_session,
         InitialContextInjection::DoNotInject,
-        CompactionReason::ModelDownshift,
-        CompactionPhase::PreTurn,
+        crate::responses_metadata::AutoCompactionMetadata::new(
+            CompactionReason::ModelDownshift,
+            CompactionPhase::PreTurn,
+            /*post_compaction_input_tokens*/ 0,
+        ),
     )
     .await
     .expect("compaction succeeds");
