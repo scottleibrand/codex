@@ -2292,7 +2292,7 @@ async fn try_run_sampling_request(
         .features
         .enabled(Feature::ConcurrentReasoningSummaries)
         && turn_context.provider.info().is_openai();
-    let mut stream = client_session
+    let stream_setup = client_session
         .stream(
             prompt,
             &step_context.settings.model_info,
@@ -2304,8 +2304,20 @@ async fn try_run_sampling_request(
             &inference_trace,
         )
         .instrument(trace_span!("stream_request"))
-        .or_cancel(&cancellation_token)
-        .await??;
+        .or_cancel(&cancellation_token);
+    let stream_setup_timeout = turn_context.provider.info().stream_setup_timeout();
+    let stream_result = match tokio::time::timeout(stream_setup_timeout, stream_setup).await {
+        Ok(result) => result,
+        Err(_) => {
+            return Err(CodexErr::ResponseStreamSetupTimeout(stream_setup_timeout));
+        }
+    };
+    let mut stream = match stream_result {
+        Ok(stream) => stream?,
+        Err(codex_async_utils::CancelErr::Cancelled) => {
+            return Err(CodexErr::TurnAborted);
+        }
+    };
     let mut in_flight: FuturesOrdered<InFlightFuture<'static>> = FuturesOrdered::new();
     let mut needs_follow_up = false;
     let mut last_agent_message: Option<String> = None;
