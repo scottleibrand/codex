@@ -101,6 +101,48 @@ const MAX_EXTRA_METADATA_ENTRIES: usize = 16;
 const MAX_EXTRA_METADATA_KEY_BYTES: usize = 64;
 pub(crate) const MAX_EXTRA_METADATA_VALUE_BYTES: usize = 128;
 
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct AutoCompactionMetadata {
+    reason: CompactionReason,
+    phase: CompactionPhase,
+    post_compaction_input_tokens: i64,
+}
+
+impl AutoCompactionMetadata {
+    pub(crate) fn new(
+        reason: CompactionReason,
+        phase: CompactionPhase,
+        post_compaction_input_tokens: i64,
+    ) -> Self {
+        Self {
+            reason,
+            phase,
+            post_compaction_input_tokens: post_compaction_input_tokens.max(0),
+        }
+    }
+
+    pub(crate) fn into_turn_metadata(
+        self,
+        implementation: CompactionImplementation,
+    ) -> CompactionTurnMetadata {
+        CompactionTurnMetadata::new(
+            CompactionTrigger::Auto,
+            self.reason,
+            implementation,
+            self.phase,
+        )
+        .with_post_compaction_input_tokens(self.post_compaction_input_tokens)
+    }
+
+    pub(crate) fn reason(self) -> CompactionReason {
+        self.reason
+    }
+
+    pub(crate) fn phase(self) -> CompactionPhase {
+        self.phase
+    }
+}
+
 /// Metadata attached to model requests whose purpose is conversation compaction.
 ///
 /// This covers both local and remote compaction requests sent through the `/responses` path. These
@@ -113,6 +155,8 @@ pub(crate) struct CompactionTurnMetadata {
     implementation: CompactionImplementation,
     phase: CompactionPhase,
     strategy: CompactionStrategy,
+    #[serde(skip)]
+    post_compaction_input_tokens: i64,
 }
 
 impl CompactionTurnMetadata {
@@ -128,7 +172,13 @@ impl CompactionTurnMetadata {
             implementation,
             phase,
             strategy: CompactionStrategy::Memento,
+            post_compaction_input_tokens: 0,
         }
+    }
+
+    pub(crate) fn with_post_compaction_input_tokens(mut self, tokens: i64) -> Self {
+        self.post_compaction_input_tokens = tokens.max(0);
+        self
     }
 
     pub(crate) fn trigger(self) -> CompactionTrigger {
@@ -145,6 +195,10 @@ impl CompactionTurnMetadata {
 
     pub(crate) fn phase(self) -> CompactionPhase {
         self.phase
+    }
+
+    pub(crate) fn post_compaction_input_tokens(self) -> i64 {
+        self.post_compaction_input_tokens
     }
 }
 
