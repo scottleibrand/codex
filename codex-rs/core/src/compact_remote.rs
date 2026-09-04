@@ -39,6 +39,7 @@ use codex_protocol::models::FunctionCallOutputBody;
 use codex_protocol::models::FunctionCallOutputPayload;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::protocol::EventMsg;
+use codex_protocol::protocol::TurnContextItem;
 use codex_protocol::protocol::TurnStartedEvent;
 use codex_rollout_trace::CompactionCheckpointTracePayload;
 use codex_tools::ToolSpec;
@@ -311,6 +312,12 @@ async fn run_remote_compact_task_inner_impl(
     let (new_window_number, new_window_ids) = sess.advance_auto_compact_window().await;
     let (new_history, world_state_baseline) =
         process_compacted_history(sess.as_ref(), new_history, &initial_context_injection).await;
+    let reference_context_item = match initial_context_injection {
+        InitialContextInjection::DoNotInject => None,
+        InitialContextInjection::BeforeLastUserMessage { .. } => {
+            Some(compaction_turn_context.to_turn_context_item())
+        }
+    };
     let base_instructions = sess.get_base_instructions().await;
     let estimated_tokens = estimate_compacted_history_tokens(
         new_history.iter(),
@@ -320,6 +327,9 @@ async fn run_remote_compact_task_inner_impl(
             .model_visible_specs()
             .as_ref(),
     )
+    .saturating_add(estimate_reference_context_item_tokens(
+        reference_context_item.as_ref(),
+    ))
     .saturating_add(compaction_metadata.post_compaction_input_tokens());
     if let Some((context_window, required_headroom)) = insufficient_post_compaction_headroom(
         estimated_tokens,
@@ -356,12 +366,6 @@ async fn run_remote_compact_task_inner_impl(
         return Ok(());
     }
 
-    let reference_context_item = match initial_context_injection {
-        InitialContextInjection::DoNotInject => None,
-        InitialContextInjection::BeforeLastUserMessage { .. } => {
-            Some(compaction_turn_context.to_turn_context_item())
-        }
-    };
     // Install is the semantic boundary where the compact endpoint's output becomes live
     // thread history. Keep it distinct from the later inference request so the reducer can
     // still represent repeated developer/context prefix items exactly as the model saw them.
@@ -423,6 +427,27 @@ pub(crate) fn insufficient_post_compaction_headroom(
         (context_window / 4).clamp(1, MAX_REQUIRED_POST_COMPACTION_HEADROOM_TOKENS);
     (estimated_tokens > context_window.saturating_sub(required_headroom))
         .then_some((context_window, required_headroom))
+}
+
+pub(crate) fn estimate_reference_context_item_tokens(
+    reference_context_item: Option<&TurnContextItem>,
+) -> i64 {
+    const REFERENCE_CONTEXT_SERIALIZATION_FALLBACK_TOKENS: i64 = 16_384;
+    let Some(reference_context_item) = reference_context_item else {
+        return 0;
+    };
+    match serde_json::to_string(reference_context_item) {
+        Ok(serialized) => i64::try_from(approx_token_count(&serialized))
+            .unwrap_or(REFERENCE_CONTEXT_SERIALIZATION_FALLBACK_TOKENS),
+        Err(error) => {
+            warn!(
+                %error,
+                fallback_tokens = REFERENCE_CONTEXT_SERIALIZATION_FALLBACK_TOKENS,
+                "failed to serialize reference context while estimating post-compaction headroom"
+            );
+            REFERENCE_CONTEXT_SERIALIZATION_FALLBACK_TOKENS
+        }
+    }
 }
 
 pub(crate) async fn process_compacted_history(
