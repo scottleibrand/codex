@@ -1,6 +1,7 @@
 use super::super::prompt::BUNDLED_GUARDIAN_POLICY_TEMPLATE;
 use super::super::prompt::guardian_policy_prompt_with_config_and_template;
 use super::*;
+use crate::config::GuardianPolicyConfig;
 use crate::context_manager::ContextManager;
 use codex_history::CodexHarnessMetadata;
 use codex_history::ResponseItemEnvelope;
@@ -547,7 +548,8 @@ async fn guardian_review_session_config_prefers_managed_policy_and_uses_catalog_
     let mut parent_config = crate::config::test_config().await;
     let managed_policy = "Use the managed Guardian policy.";
     let catalog_template = "Catalog Guardian template:\n{{ tenant_policy_config }}";
-    parent_config.guardian_policy_config = Some(managed_policy.to_string());
+    parent_config.guardian_policy =
+        GuardianPolicyConfig::with_managed_override(managed_policy.to_string());
     let model_messages = ModelMessages {
         persistent_instructions: None,
         tools: None,

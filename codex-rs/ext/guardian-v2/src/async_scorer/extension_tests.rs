@@ -861,7 +861,9 @@ async fn sample_configured_conversation_history_with_source(
         .with_model("gpt-5.5")
         .with_config(move |config| {
             config.approvals_reviewer = ApprovalsReviewer::AutoReview;
-            config.guardian_policy_config = guardian_policy;
+            config.guardian_policy = guardian_policy
+                .map(codex_core::config::GuardianPolicyConfig::with_managed_override)
+                .unwrap_or_default();
         })
         .with_pre_build_hook(move |home| {
             std::fs::write(home.join("config.toml"), guardian_config)
