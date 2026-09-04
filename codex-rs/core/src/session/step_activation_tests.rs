@@ -1,4 +1,5 @@
 use super::*;
+use crate::config::GuardianPolicyConfig;
 use crate::guardian::BUNDLED_GUARDIAN_POLICY;
 use crate::session::handlers::submission_loop;
 use crate::session::step_context::StepContext;
@@ -1003,9 +1004,13 @@ async fn parent_fallback_policy_uses_both_config_lifetimes(
 ) {
     let (_, turn) = make_session_and_context().await;
     let mut admitted_config = turn.config.as_ref().clone();
-    admitted_config.guardian_policy_config = admitted_policy.map(str::to_string);
+    admitted_config.guardian_policy = admitted_policy
+        .map(GuardianPolicyConfig::with_managed_override)
+        .unwrap_or_default();
     let mut live_config = admitted_config.clone();
-    live_config.guardian_policy_config = live_policy.map(str::to_string);
+    live_config.guardian_policy = live_policy
+        .map(GuardianPolicyConfig::with_managed_override)
+        .unwrap_or_default();
     let (mut admitted, mut destination) = safety_models();
     parent_review_messages(&mut admitted).policy = Some("catalog policy A".to_string());
     parent_review_messages(&mut destination).policy = Some("catalog policy B".to_string());
@@ -1029,7 +1034,7 @@ async fn parent_fallback_policy_uses_both_config_lifetimes(
 async fn parent_fallback_preserves_explicit_empty_and_bundled_defaults() {
     let (_, turn) = make_session_and_context().await;
     let mut config = turn.config.as_ref().clone();
-    config.guardian_policy_config = None;
+    config.guardian_policy = GuardianPolicyConfig::default();
     let (admitted, mut destination) = safety_models();
     let check = |destination: &ModelInfo| {
         check_legacy_model_safety(&admitted, &admitted, destination, &config, &config)

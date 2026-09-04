@@ -8153,10 +8153,13 @@ async fn load_config_uses_requirements_guardian_policy_config() -> std::io::Resu
     )
     .await?;
 
+    let policy = config.resolve_guardian_policy(None);
     assert_eq!(
-        config.guardian_policy_config.as_deref(),
-        Some("Use the workspace-managed guardian policy.")
+        policy.as_str(),
+        "Use the workspace-managed guardian policy."
     );
+    assert_eq!(policy.base_source(), GuardianPolicyBaseSource::Managed);
+    assert!(!policy.has_local_additions());
 
     Ok(())
 }
@@ -8180,7 +8183,7 @@ policy = "Use the user-configured guardian policy."
 }
 
 #[tokio::test]
-async fn load_config_uses_auto_review_guardian_policy_config() -> std::io::Result<()> {
+async fn load_config_appends_auto_review_guardian_policy() -> std::io::Result<()> {
     let codex_home = TempDir::new()?;
     let cfg = ConfigToml {
         auto_review: Some(AutoReviewToml {
@@ -8199,11 +8202,75 @@ async fn load_config_uses_auto_review_guardian_policy_config() -> std::io::Resul
     )
     .await?;
 
-    assert_eq!(
-        config.guardian_policy_config.as_deref(),
-        Some("Use the user-configured guardian policy.")
+    let policy = config.resolve_guardian_policy(None);
+    assert_eq!(policy.base_source(), GuardianPolicyBaseSource::Bundled);
+    assert!(policy.has_local_additions());
+    assert!(policy.as_str().starts_with(BUNDLED_GUARDIAN_POLICY));
+    assert!(policy.as_str().contains("# Additional Local Policy"));
+    assert!(
+        policy
+            .as_str()
+            .ends_with("Use the user-configured guardian policy.")
     );
 
+    Ok(())
+}
+
+#[test]
+fn guardian_policy_appends_local_additions_to_catalog_policy() {
+    let mut model_messages = codex_models_manager::bundled_models_response()
+        .expect("bundled models response")
+        .models
+        .into_iter()
+        .find_map(|model| model.model_messages)
+        .expect("bundled model messages");
+    model_messages
+        .auto_review
+        .as_mut()
+        .expect("bundled Guardian messages")
+        .policy = Some("Use the catalog Guardian policy.".to_string());
+    let policy =
+        GuardianPolicyConfig::new(None, Some("Use the local Guardian additions.".to_string()))
+            .resolve(Some(&model_messages));
+
+    assert_eq!(policy.base_source(), GuardianPolicyBaseSource::Catalog);
+    assert!(policy.has_local_additions());
+    assert!(
+        policy
+            .as_str()
+            .starts_with("Use the catalog Guardian policy.")
+    );
+    assert!(policy.as_str().contains("# Additional Local Policy"));
+    assert!(
+        policy
+            .as_str()
+            .ends_with("Use the local Guardian additions.")
+    );
+}
+
+#[tokio::test]
+async fn load_config_rejects_oversized_local_guardian_policy() -> std::io::Result<()> {
+    let codex_home = TempDir::new()?;
+    let cfg = ConfigToml {
+        auto_review: Some(AutoReviewToml {
+            policy: Some("local ".repeat(10_000)),
+        }),
+        ..Default::default()
+    };
+
+    let error = Config::load_from_base_config_with_overrides(
+        cfg,
+        ConfigOverrides {
+            cwd: Some(codex_home.path().to_path_buf()),
+            ..Default::default()
+        },
+        codex_home.abs(),
+    )
+    .await
+    .expect_err("oversized local Guardian policy should fail");
+
+    assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+    assert!(error.to_string().contains("`auto_review.policy` exceeds"));
     Ok(())
 }
 
@@ -8238,10 +8305,10 @@ async fn requirements_guardian_policy_beats_auto_review() -> std::io::Result<()>
     )
     .await?;
 
-    assert_eq!(
-        config.guardian_policy_config.as_deref(),
-        Some("Use the managed guardian policy.")
-    );
+    let policy = config.resolve_guardian_policy(None);
+    assert_eq!(policy.as_str(), "Use the managed guardian policy.");
+    assert_eq!(policy.base_source(), GuardianPolicyBaseSource::Managed);
+    assert!(!policy.has_local_additions());
 
     Ok(())
 }
@@ -8266,7 +8333,7 @@ async fn load_config_ignores_empty_auto_review_guardian_policy_config() -> std::
     )
     .await?;
 
-    assert_eq!(config.guardian_policy_config, None);
+    assert_eq!(config.guardian_policy, GuardianPolicyConfig::default());
 
     Ok(())
 }
@@ -8296,7 +8363,7 @@ async fn load_config_ignores_empty_requirements_guardian_policy_config() -> std:
     )
     .await?;
 
-    assert_eq!(config.guardian_policy_config, None);
+    assert_eq!(config.guardian_policy, GuardianPolicyConfig::default());
 
     Ok(())
 }
