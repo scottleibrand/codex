@@ -13,6 +13,7 @@ use crate::compact::compaction_status_from_result;
 use crate::compact::insert_initial_context_before_last_real_user_or_summary;
 use crate::compact_model_fallback::record_model_fallback;
 use crate::compact_model_fallback::should_retry_with_current_model;
+use codex_protocol::protocol::TurnContextItem;
 use codex_tools::ToolSpec;
 use crate::compact_remote_history::HistoryItemGroup;
 use crate::compact_remote_history::history_item_groups;
@@ -324,6 +325,12 @@ async fn run_remote_compact_task_inner_impl(
         build_compaction_initial_context(sess.as_ref(), &initial_context_injection).await;
     let new_history =
         insert_initial_context_before_last_real_user_or_summary(compacted_history, initial_context);
+    let reference_context_item = match initial_context_injection {
+        InitialContextInjection::DoNotInject => None,
+        InitialContextInjection::BeforeLastUserMessage { .. } => {
+            Some(compaction_turn_context.to_turn_context_item())
+        }
+    };
     let base_instructions = sess.get_base_instructions().await;
     let estimated_tokens = estimate_compacted_history_tokens(
         new_history.iter().map(|envelope| &envelope.item),
@@ -333,6 +340,9 @@ async fn run_remote_compact_task_inner_impl(
             .model_visible_specs()
             .as_ref(),
     )
+    .saturating_add(estimate_reference_context_item_tokens(
+        reference_context_item.as_ref(),
+    ))
     .saturating_add(compaction_metadata.post_compaction_input_tokens());
     if let Some((context_window, required_headroom)) = insufficient_post_compaction_headroom(
         estimated_tokens,
@@ -369,12 +379,6 @@ async fn run_remote_compact_task_inner_impl(
         return Ok(());
     }
 
-    let reference_context_item = match initial_context_injection {
-        InitialContextInjection::DoNotInject => None,
-        InitialContextInjection::BeforeLastUserMessage { step_context, .. } => {
-            Some(step_context.to_turn_context_item())
-        }
-    };
     if let Some(trace_input_history) = trace_input_history.as_deref() {
         let replacement_history = new_history
             .iter()
@@ -429,6 +433,26 @@ pub(crate) fn insufficient_post_compaction_headroom(
         (context_window / 4).clamp(1, MAX_REQUIRED_POST_COMPACTION_HEADROOM_TOKENS);
     (estimated_tokens > context_window.saturating_sub(required_headroom))
         .then_some((context_window, required_headroom))
+}
+pub(crate) fn estimate_reference_context_item_tokens(
+    reference_context_item: Option<&TurnContextItem>,
+) -> i64 {
+    const REFERENCE_CONTEXT_SERIALIZATION_FALLBACK_TOKENS: i64 = 16_384;
+    let Some(reference_context_item) = reference_context_item else {
+        return 0;
+    };
+    match serde_json::to_string(reference_context_item) {
+        Ok(serialized) => i64::try_from(approx_token_count(&serialized))
+            .unwrap_or(REFERENCE_CONTEXT_SERIALIZATION_FALLBACK_TOKENS),
+        Err(error) => {
+            warn!(
+                %error,
+                fallback_tokens = REFERENCE_CONTEXT_SERIALIZATION_FALLBACK_TOKENS,
+                "failed to serialize reference context while estimating post-compaction headroom"
+            );
+            REFERENCE_CONTEXT_SERIALIZATION_FALLBACK_TOKENS
+        }
+    }
 }
 
 struct RemoteCompactionV2Output {
