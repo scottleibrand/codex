@@ -45,6 +45,7 @@ use codex_rollout_trace::CompactionCheckpointTracePayload;
 use codex_tools::ToolSpec;
 use codex_utils_output_truncation::approx_token_count;
 use tokio_util::sync::CancellationToken;
+use tracing::warn;
 
 #[path = "compact_remote_request.rs"]
 mod request;

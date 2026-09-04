@@ -1542,14 +1542,16 @@ async fn remote_compact_v2_reuses_compaction_trigger_for_followups() -> Result<(
     skip_if_no_network!(Ok(()));
 
     let harness = TestCodexHarness::with_builder(
-        test_codex()
-            .with_auth(CodexAuth::create_dummy_chatgpt_auth_for_testing())
+        amazon_bedrock_test_codex()
+            .with_model_info_override(AMAZON_BEDROCK_GPT_5_5_MODEL_ID, |model_info| {
+                model_info.input_modalities.push(InputModality::Image);
+            })
             .with_config(|config| {
                 let _ = config.features.enable(Feature::RemoteCompactionV2);
             }),
     )
     .await?;
-    let image_url = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR4nGNgYAAAAAMAASsJTYQAAAAASUVORK5CYII=";
+    let image_url = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/iZk9HQAAAABJRU5ErkJggg==";
     let user_notice = "<image_resize_notice>retained user image</image_resize_notice>";
     let tool_notice = "<image_resize_notice>discarded tool image</image_resize_notice>";
     let unlisted_notice = "<unlisted_notice>discarded developer notice</unlisted_notice>";
@@ -1634,10 +1636,16 @@ async fn remote_compact_v2_reuses_compaction_trigger_for_followups() -> Result<(
     .await;
 
     codex
-        .start_or_steer_turn(TurnInputRequest::user_input(vec![UserInput::Text {
-            text: "hello remote compact".into(),
-            text_elements: Vec::new(),
-        }]))
+        .start_or_steer_turn(TurnInputRequest::user_input(vec![
+            UserInput::Text {
+                text: "hello remote compact".into(),
+                text_elements: Vec::new(),
+            },
+            UserInput::Image {
+                image_url: image_url.to_string(),
+                detail: None,
+            },
+        ]))
         .await?;
     wait_for_turn_complete(&codex).await;
 
@@ -1709,6 +1717,13 @@ async fn remote_compact_v2_reuses_compaction_trigger_for_followups() -> Result<(
     wait_for_turn_complete(&codex).await;
 
     let response_requests = responses_mock.requests();
+    assert!(
+        response_requests[0]
+            .message_input_image_urls("user")
+            .iter()
+            .any(|url| url == image_url),
+        "expected the initial model request to receive the submitted image"
+    );
     let compact_request = &response_requests[3];
     let item_create_time = |request: &responses::ResponsesRequest, text: &str| {
         request
@@ -1808,6 +1823,13 @@ async fn remote_compact_v2_reuses_compaction_trigger_for_followups() -> Result<(
         !compact_body.contains("ENCRYPTED_CONTEXT_COMPACTION_SUMMARY"),
         "expected v2 compaction trigger item to omit encrypted_content"
     );
+    assert!(
+        compact_request
+            .message_input_image_urls("user")
+            .iter()
+            .any(|url| url == image_url),
+        "expected the first v2 compaction request to inspect the current image"
+    );
 
     let follow_up_request = response_requests.last().expect("follow-up request missing");
     assert_eq!(
@@ -1865,6 +1887,16 @@ async fn remote_compact_v2_reuses_compaction_trigger_for_followups() -> Result<(
     assert!(
         follow_up_body.contains("hello remote compact"),
         "expected v2 follow-up request to preserve retained original user messages"
+    );
+    assert!(
+        follow_up_request
+            .message_input_image_urls("user")
+            .is_empty(),
+        "expected v2 follow-up request to omit retained image bytes"
+    );
+    assert!(
+        follow_up_body.contains("[Image omitted after compaction]"),
+        "expected v2 follow-up request to preserve an image omission marker"
     );
     assert!(
         follow_up_request.input().windows(2).any(|items| {
