@@ -56,6 +56,7 @@ use codex_utils_output_truncation::approx_token_count;
 use codex_utils_output_truncation::truncate_text;
 use futures::StreamExt;
 use tokio_util::sync::CancellationToken;
+use tracing::warn;
 
 #[path = "compact_remote_v2_attempt.rs"]
 mod attempt;
@@ -73,6 +74,7 @@ enum RetainedImageBudget {
 
 pub(crate) const RETAINED_MESSAGE_TOKEN_BUDGET: usize = 64_000;
 const MAX_RETAINED_AGENT_MESSAGE_TOKENS: i64 = 10_000;
+const MAX_REQUIRED_POST_COMPACTION_HEADROOM_TOKENS: i64 = 64_000;
 // Compact attempts can run much longer than normal turns, so keep the per-transport
 // retry budget smaller than the general Responses stream retry budget.
 const MAX_REMOTE_COMPACTION_V2_STREAM_RETRIES: u64 = 2;
@@ -323,6 +325,43 @@ async fn run_remote_compact_task_inner_impl(
         build_compaction_initial_context(sess.as_ref(), &initial_context_injection).await;
     let new_history =
         insert_initial_context_before_last_real_user_or_summary(compacted_history, initial_context);
+    let base_instructions = sess.get_base_instructions().await;
+    let estimated_tokens =
+        estimate_compacted_history_tokens(&new_history, base_instructions.text.as_str());
+    if let Some((context_window, required_headroom)) = insufficient_post_compaction_headroom(
+        estimated_tokens,
+        compaction_turn_context.model_context_window(),
+    ) {
+        warn!(
+            turn_id = %compaction_turn_context.sub_id,
+            estimated_tokens,
+            context_window,
+            required_headroom,
+            "remote compaction left insufficient context headroom; starting a fresh context window"
+        );
+        let world_state = match world_state_baseline {
+            Some(world_state) => world_state,
+            None => Arc::new(sess.build_world_state_for_step(step_context).await?),
+        };
+        sess.start_new_context_window(step_context, world_state)
+            .await;
+        if let Some(trace_input_history) = trace_input_history.as_deref() {
+            let replacement_history = sess
+                .clone_history()
+                .await
+                .into_annotated_items()
+                .into_iter()
+                .map(ResponseItemEnvelope::into_item)
+                .collect::<Vec<_>>();
+            compaction_trace.record_installed(&CompactionCheckpointTracePayload {
+                input_history: trace_input_history,
+                replacement_history: &replacement_history,
+            });
+        }
+        sess.emit_turn_item_completed(compaction_turn_context, compaction_item)
+            .await;
+        return Ok(());
+    }
 
     let reference_context_item = match initial_context_injection {
         InitialContextInjection::DoNotInject => None,
@@ -358,6 +397,28 @@ async fn run_remote_compact_task_inner_impl(
     sess.emit_turn_item_completed(compaction_turn_context, compaction_item)
         .await;
     Ok(())
+}
+
+fn estimate_compacted_history_tokens(
+    history: &[ResponseItemEnvelope],
+    base_instructions: &str,
+) -> i64 {
+    let base_tokens = i64::try_from(approx_token_count(base_instructions)).unwrap_or(i64::MAX);
+    history
+        .iter()
+        .map(|envelope| estimate_item_token_count(&envelope.item))
+        .fold(base_tokens, i64::saturating_add)
+}
+
+fn insufficient_post_compaction_headroom(
+    estimated_tokens: i64,
+    context_window: Option<i64>,
+) -> Option<(i64, i64)> {
+    let context_window = context_window?;
+    let required_headroom =
+        (context_window / 4).clamp(1, MAX_REQUIRED_POST_COMPACTION_HEADROOM_TOKENS);
+    (estimated_tokens > context_window.saturating_sub(required_headroom))
+        .then_some((context_window, required_headroom))
 }
 
 struct RemoteCompactionV2Output {
@@ -869,6 +930,19 @@ mod tests {
             raw(history),
             vec![message("user", "user", /*phase*/ None), hook, output]
         );
+    }
+
+    #[test]
+    fn oversized_remote_compaction_requires_fresh_context_window() {
+        assert_eq!(
+            insufficient_post_compaction_headroom(242_659, Some(258_400)),
+            Some((258_400, 64_000))
+        );
+        assert_eq!(
+            insufficient_post_compaction_headroom(194_400, Some(258_400)),
+            None
+        );
+        assert_eq!(insufficient_post_compaction_headroom(1, None), None);
     }
 
     #[test]
