@@ -1845,7 +1845,6 @@ fn build_guardian_transcript_preserves_recent_tool_context_when_user_history_is_
     );
 }
 
-
 enum GuardianTestCatalog {
     Bundled,
     ParentOnly,

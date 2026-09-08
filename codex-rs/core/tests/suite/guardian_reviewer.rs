@@ -162,10 +162,7 @@ async fn merged_config_reviewer_uses_reserved_provider_for_untrusted_parent() ->
         .clone();
     assert_eq!(options.provider, expected_provider);
     assert_eq!(Some(options.model), Some("codex-auto-review".to_string()));
-    assert_eq!(
-        options.reasoning_effort,
-        Some(ReasoningEffort::Low)
-    );
+    assert_eq!(options.reasoning_effort, Some(ReasoningEffort::Low));
     Ok(())
 }
 
@@ -206,10 +203,6 @@ async fn policy_only_config_preserves_parent_model_fallback() -> Result<()> {
     let options = resolve_reviewer(&test, &parent_config).await?;
 
     assert_eq!(Some(options.model), Some("gpt-5.5".to_string()));
-    assert_eq!(
-        options.reasoning_effort,
-        Some(ReasoningEffort::Medium)
-    );
+    assert_eq!(options.reasoning_effort, Some(ReasoningEffort::Medium));
     Ok(())
 }
-
