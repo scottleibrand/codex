@@ -371,3 +371,94 @@ async fn connection_failure_pauses_retry_budget_until_provider_is_reachable() ->
 
     Ok(())
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn retries_when_transport_keepalives_have_no_response_events() {
+    skip_if_no_network!();
+
+    let mut keepalive_senders = Vec::new();
+    let mut stalled_stream = Vec::new();
+    for _ in 0..100 {
+        let (sender, receiver) = oneshot::channel();
+        keepalive_senders.push(sender);
+        stalled_stream.push(StreamingSseChunk {
+            gate: Some(receiver),
+            body: ": keepalive\n\n".to_string(),
+        });
+    }
+    let completed_sse = responses::sse_completed("resp_ok");
+    let (server, _) = start_streaming_sse_server(vec![
+        stalled_stream,
+        vec![StreamingSseChunk {
+            gate: None,
+            body: completed_sse,
+        }],
+    ])
+    .await;
+
+    let keepalive_task = tokio::spawn(async move {
+        for sender in keepalive_senders {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            if sender.send(()).is_err() {
+                break;
+            }
+        }
+    });
+
+    let model_provider = ModelProviderInfo {
+        name: "openai".into(),
+        base_url: Some(format!("{}/v1", server.uri())),
+        env_key: Some("PATH".into()),
+        env_key_instructions: None,
+        experimental_bearer_token: None,
+        auth: None,
+        aws: None,
+        wire_api: WireApi::Responses,
+        query_params: None,
+        http_headers: None,
+        env_http_headers: None,
+        request_max_retries: Some(0),
+        stream_max_retries: Some(1),
+        stream_idle_timeout_ms: Some(500),
+        stream_setup_timeout_ms: None,
+        sampling_timeout_ms: None,
+        websocket_connect_timeout_ms: None,
+        requires_openai_auth: false,
+        supports_websockets: false,
+        supports_standalone_web_search: false,
+    };
+
+    let TestCodex { codex, .. } = test_codex()
+        .with_config(move |config| {
+            config.model_provider = model_provider;
+        })
+        .build_with_streaming_server(&server)
+        .await
+        .unwrap();
+
+    codex
+        .start_or_steer_turn(TurnInputRequest::user_input(vec![UserInput::Text {
+            text: "hello".into(),
+            text_elements: Vec::new(),
+        }]))
+        .await
+        .unwrap();
+
+    tokio::time::timeout(
+        Duration::from_secs(5),
+        wait_for_event(&codex, |event| matches!(event, EventMsg::TurnComplete(_))),
+    )
+    .await
+    .expect("transport keepalives must not postpone the semantic idle deadline");
+
+    let requests = server.requests().await;
+    assert_eq!(
+        requests.len(),
+        2,
+        "expected retry after response-event idle timeout"
+    );
+
+    keepalive_task.abort();
+    server.shutdown().await;
+}
+

@@ -2458,15 +2458,24 @@ async fn try_run_sampling_request(
         );
 
         let receive_event = async {
-            let event = match stream
-                .next()
-                .instrument(trace_span!(parent: &handle_responses, "receiving"))
-                .or_cancel(&cancellation_token)
-                .await
+            let stream_idle_timeout = turn_context.config.model_provider.stream_idle_timeout();
+            let event = match tokio::time::timeout(
+                stream_idle_timeout,
+                stream
+                    .next()
+                    .instrument(trace_span!(parent: &handle_responses, "receiving"))
+                    .or_cancel(&cancellation_token),
+            )
+            .await
             {
-                Ok(event) => event,
-                Err(codex_async_utils::CancelErr::Cancelled) => {
+                Ok(Ok(event)) => event,
+                Ok(Err(codex_async_utils::CancelErr::Cancelled)) => {
                     return Err(CodexErr::TurnAborted);
+                }
+                Err(_) => {
+                    return Err(CodexErr::Stream(format!(
+                        "idle timeout waiting for response event after {stream_idle_timeout:?}"
+                    )));
                 }
             };
 
