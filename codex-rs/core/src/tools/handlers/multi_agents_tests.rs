@@ -943,7 +943,7 @@ async fn multi_agent_v2_spawn_requires_task_name() {
     let Err(err) = SpawnAgentHandlerV2::default().handle(invocation).await else {
         panic!("missing task_name should be rejected");
     };
-    let FunctionCallError::RespondToModel(message) = err else {
+    let FunctionCallError::MalformedArguments(message) = err else {
         panic!("missing task_name should surface as a model-facing error");
     };
     assert!(message.contains("missing field `task_name`"));
@@ -979,7 +979,7 @@ async fn multi_agent_v2_spawn_rejects_legacy_items_field() {
     let Err(err) = SpawnAgentHandlerV2::default().handle(invocation).await else {
         panic!("legacy items field should be rejected");
     };
-    let FunctionCallError::RespondToModel(message) = err else {
+    let FunctionCallError::MalformedArguments(message) = err else {
         panic!("legacy items field should surface as a model-facing error");
     };
     assert!(message.contains("unknown field `items`"));
@@ -1733,7 +1733,7 @@ async fn multi_agent_v2_send_message_rejects_legacy_items_field() {
     let Err(err) = SendMessageHandlerV2.handle(invocation).await else {
         panic!("legacy items field should be rejected in v2");
     };
-    let FunctionCallError::RespondToModel(message) = err else {
+    let FunctionCallError::MalformedArguments(message) = err else {
         panic!("legacy items field should surface as a model-facing error");
     };
     assert!(message.contains("unknown field `items`"));
@@ -2016,7 +2016,7 @@ async fn multi_agent_v2_followup_task_rejects_legacy_items_field() {
     let Err(err) = FollowupTaskHandlerV2.handle(invocation).await else {
         panic!("legacy items field should be rejected in v2");
     };
-    let FunctionCallError::RespondToModel(message) = err else {
+    let FunctionCallError::MalformedArguments(message) = err else {
         panic!("legacy items field should surface as a model-facing error");
     };
     assert!(message.contains("unknown field `items`"));
