@@ -1630,10 +1630,20 @@ async fn run_sampling_request(
         }
 
         if !err.is_retryable() {
+            warn!(
+                thread_id = %sess.thread_id,
+                turn_id = %turn_context.sub_id,
+                session_source = ?turn_context.session_source,
+                sampling_attempt,
+                max_retries,
+                error_info = ?err.to_codex_protocol_error(),
+                error = %err,
+                "sampling request failed outside the response retry policy"
+            );
             return Err(err);
         }
 
-        handle_retryable_response_stream_error(
+        if let Err(err) = handle_retryable_response_stream_error(
             &mut retry_state,
             max_retries,
             err,
@@ -1642,7 +1652,20 @@ async fn run_sampling_request(
             &turn_context,
             ResponsesStreamRequest::Sampling,
         )
-        .await?;
+        .await
+        {
+            warn!(
+                thread_id = %sess.thread_id,
+                turn_id = %turn_context.sub_id,
+                session_source = ?turn_context.session_source,
+                sampling_attempt,
+                max_retries,
+                error_info = ?err.to_codex_protocol_error(),
+                error = %err,
+                "sampling response retry policy returned a terminal error"
+            );
+            return Err(err);
+        }
         sampling_attempt = sampling_attempt.saturating_add(1);
         turn_context.turn_timing_state.record_sampling_retry();
     }
