@@ -188,7 +188,10 @@ fn check_legacy_model_safety(
             let destination_policy =
                 config.resolve_guardian_policy(destination.model_messages.as_ref());
             if retained_models.iter().any(|model| {
-                config.resolve_guardian_policy(model.model_messages.as_ref()) != destination_policy
+                config
+                    .resolve_guardian_policy(model.model_messages.as_ref())
+                    .as_str()
+                    != destination_policy.as_str()
             }) {
                 return Err(
                     "the destination changes the Guardian parent-fallback policy".to_string(),
