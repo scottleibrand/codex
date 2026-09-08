@@ -728,6 +728,53 @@ async fn run_before_review_deadline_aborts_when_cancelled() {
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn run_before_review_deadline_rejects_ready_result_after_cancellation() {
+    let cancel_token = CancellationToken::new();
+    cancel_token.cancel();
+    let outcome = run_before_review_deadline(
+        tokio::time::Instant::now() + Duration::from_secs(1),
+        Some(&cancel_token),
+        std::future::ready(()),
+    )
+    .await;
+    assert!(matches!(
+        outcome,
+        Err(GuardianReviewSessionOutcome::Aborted)
+    ));
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn run_before_review_deadline_rejects_result_cancelled_during_poll() {
+    let cancel_token = CancellationToken::new();
+    let outcome = run_before_review_deadline(
+        tokio::time::Instant::now() + Duration::from_secs(1),
+        Some(&cancel_token),
+        async {
+            cancel_token.cancel();
+        },
+    )
+    .await;
+    assert!(matches!(
+        outcome,
+        Err(GuardianReviewSessionOutcome::Aborted)
+    ));
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn run_before_review_deadline_rejects_ready_result_after_expiry() {
+    let outcome = run_before_review_deadline(
+        tokio::time::Instant::now() - Duration::from_secs(1),
+        /*external_cancel*/ None,
+        std::future::ready(()),
+    )
+    .await;
+    assert!(matches!(
+        outcome,
+        Err(GuardianReviewSessionOutcome::TimedOut)
+    ));
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn run_before_review_deadline_with_cancel_cancels_token_on_timeout() {
     let cancel_token = CancellationToken::new();
 
@@ -1139,6 +1186,35 @@ async fn wait_for_guardian_review_cancel_drains_expected_turn_after_stale_termin
     interrupt_response
         .await
         .expect("interrupt response task should complete");
+    assert!(matches!(outcome, GuardianReviewSessionOutcome::Aborted));
+    assert!(keep_review_session);
+    assert!(!capture_token_usage);
+}
+
+#[tokio::test]
+async fn wait_for_guardian_review_cancellation_wins_over_queued_allow() {
+    let (review_session, tx_event, _rx_sub) = test_review_session().await;
+    tx_event
+        .send(turn_complete_event(
+            "current-turn",
+            Some(r#"{"outcome":"allow"}"#),
+            /*time_to_first_token_ms*/ None,
+        ))
+        .await
+        .expect("queue completed approval");
+    let external_cancel = CancellationToken::new();
+    external_cancel.cancel();
+
+    let mut analytics_result = GuardianReviewAnalyticsResult::without_session();
+    let (outcome, keep_review_session, capture_token_usage) = wait_for_guardian_review(
+        &review_session,
+        "current-turn",
+        tokio::time::Instant::now() + Duration::from_secs(1),
+        Some(&external_cancel),
+        &mut analytics_result,
+    )
+    .await;
+
     assert!(matches!(outcome, GuardianReviewSessionOutcome::Aborted));
     assert!(keep_review_session);
     assert!(!capture_token_usage);
