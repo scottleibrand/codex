@@ -38,15 +38,10 @@ fn check_legacy_turn_safety(
         .config_layer_stack
         .requirements()
         .auto_review_required_for_model(&turn_context.model_info().slug);
-    let ignored_models = stack
-        .requirements_toml()
-        .auto_review
-        .as_ref()
-        .and_then(|review| review.ignore_rules.as_ref());
-    let ignores_prefix_rules = |model: &ModelInfo| {
-        model.model_specialty.as_deref() == Some(MODEL_SPECIALTY_CYBER)
-            || ignored_models.is_some_and(|models| models.contains(&model.slug))
-    };
+    let current_is_cyber =
+        current.model_info.model_specialty.as_deref() == Some(MODEL_SPECIALTY_CYBER);
+    let destination_is_cyber =
+        destination.model_info.model_specialty.as_deref() == Some(MODEL_SPECIALTY_CYBER);
 
     // Approval policy and required-model classification still have consumers
     // using the originating turn. The reviewer is captured separately.
@@ -62,9 +57,12 @@ fn check_legacy_turn_safety(
     {
         return Err("the destination changes model-required approval authority".to_string());
     }
-    // Command approval continues to use TurnContext::allow_prefix_rules.
-    if ignores_prefix_rules(&destination.model_info) != ignores_prefix_rules(&current.model_info)
-        || ignores_prefix_rules(&destination.model_info)
+    // Command approval continues to use TurnContext::allow_prefix_rules. Its
+    // legacy behavior only carries the Cyber-model restriction; managed
+    // auto_review.ignore_rules are intentionally no longer part of it so
+    // explicit command allows remain effective for those models.
+    if destination_is_cyber != current_is_cyber
+        || destination_is_cyber
             != (turn_context.allow_prefix_rules() == AllowPrefixRules::IgnoreForCyberModel)
     {
         return Err("the destination changes the admitted prefix-rule policy".to_string());
