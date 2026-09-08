@@ -14,6 +14,7 @@ use codex_analytics::GuardianV2Event;
 use codex_analytics::GuardianV2EventKind;
 use codex_core::ThreadManager;
 use codex_core::config::Config;
+use codex_core::config::is_trusted_reviewer_provider;
 use codex_core::context::GuardianContextMode;
 use codex_core::context::GuardianReviewEvidence;
 use codex_core::context::NodeReplReviewEvidence;
@@ -109,6 +110,15 @@ impl ThreadLifecycleContributor<Config> for GuardianV2Extension {
     ) -> ExtensionFuture<'a, ()> {
         Box::pin(async move {
             if !input.config.features.enabled(Feature::GuardianApproval) {
+                return;
+            }
+
+            if !is_trusted_reviewer_provider(
+                &input.config.model_provider_id,
+                &input.config.model_provider,
+            ) {
+                input.thread_store.remove::<GuardianV2Enabled>();
+                input.thread_store.remove::<LunaSampler>();
                 return;
             }
 

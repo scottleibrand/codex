@@ -26,6 +26,7 @@ use codex_config::NetworkDomainPermissionToml;
 use codex_config::NetworkDomainPermissionsToml;
 use codex_config::RequirementSource;
 use codex_config::Sourced;
+use codex_config::config_toml::AutoReviewToml;
 use codex_config::config_toml::ConfigToml;
 use codex_config::types::McpServerConfig;
 use codex_exec_server::LOCAL_FS;
@@ -35,6 +36,7 @@ use codex_guardian_context::ConversationTranscriptEntryKind;
 use codex_history::RolloutItem;
 use codex_model_provider::create_model_provider;
 use codex_model_provider_info::AMAZON_BEDROCK_GPT_5_4_MODEL_ID;
+use codex_model_provider_info::AMAZON_BEDROCK_GPT_5_6_LUNA_MODEL_ID;
 use codex_model_provider_info::AMAZON_BEDROCK_PROVIDER_ID;
 use codex_model_provider_info::ModelProviderInfo;
 use codex_model_provider_info::OPENAI_PROVIDER_ID;
@@ -1947,6 +1949,7 @@ fn build_guardian_transcript_preserves_recent_tool_context_when_user_history_is_
     );
 }
 
+
 enum GuardianTestCatalog {
     Bundled,
     ParentOnly,
@@ -2879,7 +2882,7 @@ async fn guardian_reused_trunk_ignores_stale_prior_turn_completion() -> anyhow::
                 ev_response_created("resp-guardian-2"),
                 ev_assistant_message(
                     "msg-guardian-2",
-                    "{\"risk_level\":\"low\",\"user_authorization\":\"high\",\"outcome\":\"allow\",\"rationale\":\"second guardian rationale\"}",
+                    "{\"risk_level\":\"high\",\"user_authorization\":\"low\",\"outcome\":\"deny\",\"rationale\":\"second guardian rationale\"}",
                 ),
                 ev_completed("resp-guardian-2"),
             ]),
@@ -2925,7 +2928,7 @@ async fn guardian_reused_trunk_ignores_stale_prior_turn_completion() -> anyhow::
                 turn_id: "stale-turn".to_string(),
                 started_at: None,
                 last_agent_message: Some(
-                    "{\"risk_level\":\"high\",\"user_authorization\":\"low\",\"outcome\":\"deny\",\"rationale\":\"stale guardian rationale\"}"
+                    "{\"risk_level\":\"low\",\"user_authorization\":\"high\",\"outcome\":\"allow\",\"rationale\":\"stale guardian rationale\"}"
                         .to_string(),
                 ),
                 error: None,
@@ -2942,12 +2945,12 @@ async fn guardian_reused_trunk_ignores_stale_prior_turn_completion() -> anyhow::
         GuardianApprovalRequest::ExecCommand {
             id: "shell-2".to_string(),
             environment_id: codex_exec_server::LOCAL_ENVIRONMENT_ID.to_string(),
-            command: vec!["git".to_string(), "push".to_string()],
+            command: vec!["git".to_string(), "push".to_string(), "--force".to_string()],
             cwd: test_path_buf("/repo/codex-rs/core").abs().into(),
             guardian_cwd: native_guardian_cwd("/repo/codex-rs/core"),
             sandbox_permissions: crate::sandboxing::SandboxPermissions::UseDefault,
             additional_permissions: None,
-            justification: Some("Need to push the second docs fix.".to_string()),
+            justification: Some("Need to force-push the second docs fix.".to_string()),
             tty: false,
         },
         ApprovalRequestReasons::default(),
@@ -2960,8 +2963,15 @@ async fn guardian_reused_trunk_ignores_stale_prior_turn_completion() -> anyhow::
     else {
         panic!("expected second guardian assessment");
     };
-    assert_eq!(second_assessment.outcome, GuardianAssessmentOutcome::Allow);
-    assert_eq!(second_assessment.rationale, "second guardian rationale");
+    assert_eq!(
+        second_assessment,
+        GuardianAssessment {
+            risk_level: GuardianRiskLevel::High,
+            user_authorization: GuardianUserAuthorization::Low,
+            outcome: GuardianAssessmentOutcome::Deny,
+            rationale: "second guardian rationale".to_string(),
+        }
+    );
     assert!(matches!(
         second_metadata.guardian_session_kind,
         Some(codex_analytics::GuardianReviewSessionKind::TrunkReused)
@@ -3818,6 +3828,166 @@ async fn guardian_review_session_config_preserves_context_overrides_for_same_eff
             guardian_config.model_auto_compact_token_limit,
         ),
         (Some(128_000), Some(100_000))
+    );
+}
+
+#[tokio::test]
+async fn guardian_review_session_config_preserves_parent_openai_endpoint() {
+    let server = start_mock_server().await;
+    let (mut session, mut turn) = guardian_test_session_and_turn(&server).await;
+    let parent_model = turn.model_info().as_ref().clone();
+    let auth_manager = Arc::clone(&session.services.auth_manager);
+    Arc::get_mut(&mut session)
+        .expect("session should be unique")
+        .services
+        .models_manager = Arc::new(StaticModelsManager::new(
+        Some(auth_manager),
+        ModelsResponse {
+            models: vec![parent_model],
+        },
+    ));
+
+    let mut config = (*turn.config).clone();
+    let expected_base_url = config.model_provider.base_url.clone();
+    config.model = Some("stale-parent-model".to_string());
+    Arc::get_mut(&mut turn)
+        .expect("turn should be unique")
+        .config = Arc::new(config);
+
+    let guardian_config = guardian_review_session_config(session.as_ref(), turn.as_ref())
+        .await
+        .expect("configured OpenAI endpoint should be preserved")
+        .spawn_config;
+
+    assert_eq!(
+        (
+            guardian_config.model_provider.request_max_retries,
+            guardian_config.model_provider.stream_max_retries,
+        ),
+        (Some(1), Some(1)),
+    );
+    assert_eq!(guardian_config.model_provider.base_url, expected_base_url);
+    assert_eq!(guardian_config.model_provider_id, OPENAI_PROVIDER_ID);
+}
+
+#[tokio::test]
+async fn guardian_review_session_config_fails_closed_for_fireworks_parent() {
+    let server = start_mock_server().await;
+    let (mut session, mut turn) = guardian_test_session_and_turn(&server).await;
+    let parent_model = turn.model_info().as_ref().clone();
+    let auth_manager = Arc::clone(&session.services.auth_manager);
+    Arc::get_mut(&mut session)
+        .expect("session should be unique")
+        .services
+        .models_manager = Arc::new(StaticModelsManager::new(
+        Some(auth_manager),
+        ModelsResponse {
+            models: vec![parent_model],
+        },
+    ));
+
+    let mut config = (*turn.config).clone();
+    config.model_provider_id = "fireworks".to_string();
+    config.model_provider = ModelProviderInfo {
+        name: "Fireworks".to_string(),
+        base_url: Some("https://api.fireworks.ai/inference/v1".to_string()),
+        env_key: Some("FIREWORKS_API_KEY".to_string()),
+        ..Default::default()
+    };
+    config
+        .model_providers
+        .insert("fireworks".to_string(), config.model_provider.clone());
+    Arc::get_mut(&mut turn)
+        .expect("turn should be unique")
+        .config = Arc::new(config);
+
+    let error = guardian_review_session_config(session.as_ref(), turn.as_ref())
+        .await
+        .err()
+        .expect("Fireworks parent must not silently review itself");
+    let message = error.to_string();
+    assert!(
+        message.contains("Guardian reviewer model `") && message.contains("` is not available"),
+        "unexpected error: {message}"
+    );
+}
+
+#[test_case::test_case("Fireworks")]
+#[test_case::test_case("OpenAI")]
+#[tokio::test]
+async fn guardian_review_session_config_rejects_untrusted_configured_reviewer(display_name: &str) {
+    let server = start_mock_server().await;
+    let (session, mut turn) = guardian_test_session_and_turn(&server).await;
+    let mut config = (*turn.config).clone();
+    let fireworks = ModelProviderInfo {
+        name: display_name.to_string(),
+        base_url: Some("https://api.fireworks.ai/inference/v1".to_string()),
+        env_key: Some("FIREWORKS_API_KEY".to_string()),
+        ..Default::default()
+    };
+    config
+        .model_providers
+        .insert("fireworks".to_string(), fireworks);
+    config.auto_review = Some(AutoReviewToml {
+        model_provider: Some("fireworks".to_string()),
+        model: Some("gpt-oss-120b".to_string()),
+        reasoning_effort: None,
+        policy: None,
+    });
+    Arc::get_mut(&mut turn)
+        .expect("turn should be unique")
+        .config = Arc::new(config);
+
+    let error = guardian_review_session_config(session.as_ref(), turn.as_ref())
+        .await
+        .err()
+        .expect("configured Fireworks reviewer must be rejected");
+    assert!(
+        error
+            .to_string()
+            .contains("reviewer provider `fireworks` is not trusted")
+    );
+}
+
+#[tokio::test]
+async fn guardian_review_session_config_keeps_bedrock_reviewer_on_bedrock() {
+    let server = start_mock_server().await;
+    let (mut session, mut turn) = guardian_test_session_and_turn(&server).await;
+    let mut reviewer_model = turn.model_info().as_ref().clone();
+    reviewer_model.slug = AMAZON_BEDROCK_GPT_5_6_LUNA_MODEL_ID.to_string();
+    let auth_manager = Arc::clone(&session.services.auth_manager);
+    Arc::get_mut(&mut session)
+        .expect("session should be unique")
+        .services
+        .models_manager = Arc::new(StaticModelsManager::new(
+        Some(auth_manager),
+        ModelsResponse {
+            models: vec![reviewer_model],
+        },
+    ));
+    update_turn_settings_for_test(
+        Arc::get_mut(&mut turn).expect("turn should be unique"),
+        |settings| Arc::make_mut(&mut settings.model_info).auto_review_model_override = None,
+    );
+
+    let mut config = (*turn.config).clone();
+    config.model_provider_id = AMAZON_BEDROCK_PROVIDER_ID.to_string();
+    config.model_provider = ModelProviderInfo::create_amazon_bedrock_provider(/*aws*/ None);
+    Arc::get_mut(&mut turn)
+        .expect("turn should be unique")
+        .config = Arc::new(config);
+
+    let guardian_config = guardian_review_session_config(session.as_ref(), turn.as_ref())
+        .await
+        .expect("Bedrock reviewer should resolve")
+        .spawn_config;
+    assert_eq!(
+        guardian_config.model_provider_id,
+        AMAZON_BEDROCK_PROVIDER_ID
+    );
+    assert_eq!(
+        guardian_config.model,
+        Some(AMAZON_BEDROCK_GPT_5_6_LUNA_MODEL_ID.to_string())
     );
 }
 

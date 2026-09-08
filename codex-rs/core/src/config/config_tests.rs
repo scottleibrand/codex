@@ -8188,6 +8188,9 @@ async fn load_config_appends_auto_review_guardian_policy() -> std::io::Result<()
     let cfg = ConfigToml {
         auto_review: Some(AutoReviewToml {
             policy: Some("  Use the user-configured guardian policy.  ".to_string()),
+            model_provider: None,
+            model: None,
+            reasoning_effort: None,
         }),
         ..Default::default()
     };
@@ -8254,6 +8257,9 @@ async fn load_config_rejects_oversized_local_guardian_policy() -> std::io::Resul
     let cfg = ConfigToml {
         auto_review: Some(AutoReviewToml {
             policy: Some("local ".repeat(10_000)),
+            model_provider: None,
+            model: None,
+            reasoning_effort: None,
         }),
         ..Default::default()
     };
@@ -8289,6 +8295,9 @@ async fn requirements_guardian_policy_beats_auto_review() -> std::io::Result<()>
     let cfg = ConfigToml {
         auto_review: Some(AutoReviewToml {
             policy: Some("Use the user-configured guardian policy.".to_string()),
+            model_provider: None,
+            model: None,
+            reasoning_effort: None,
         }),
         ..Default::default()
     };
@@ -8319,6 +8328,9 @@ async fn load_config_ignores_empty_auto_review_guardian_policy_config() -> std::
     let cfg = ConfigToml {
         auto_review: Some(AutoReviewToml {
             policy: Some("   ".to_string()),
+            model_provider: None,
+            model: None,
+            reasoning_effort: None,
         }),
         ..Default::default()
     };
