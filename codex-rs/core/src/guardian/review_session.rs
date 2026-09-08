@@ -1476,81 +1476,69 @@ async fn wait_for_guardian_review(
     external_cancel: Option<&CancellationToken>,
     analytics_result: &mut GuardianReviewAnalyticsResult,
 ) -> (GuardianReviewSessionOutcome, bool, bool) {
-    let timeout = tokio::time::sleep_until(deadline);
-    tokio::pin!(timeout);
     let mut last_error: Option<ErrorEvent> = None;
 
     loop {
-        tokio::select! {
-            _ = &mut timeout => {
-                let keep_review_session = interrupt_and_drain_turn(
-                    review_session,
-                    expected_turn_id,
-                )
-                .await
-                .is_ok();
-                return (GuardianReviewSessionOutcome::TimedOut, keep_review_session, false);
+        let event = match run_before_review_deadline(
+            deadline,
+            external_cancel,
+            review_session.io.next_event(),
+        )
+        .await
+        {
+            Ok(event) => event,
+            Err(outcome) => {
+                let keep_review_session =
+                    interrupt_and_drain_turn(review_session, expected_turn_id)
+                        .await
+                        .is_ok();
+                return (outcome, keep_review_session, false);
             }
-            _ = async {
-                if let Some(cancel_token) = external_cancel {
-                    cancel_token.cancelled().await;
-                } else {
-                    std::future::pending::<()>().await;
-                }
-            } => {
-                let keep_review_session = interrupt_and_drain_turn(
-                    review_session,
-                    expected_turn_id,
-                )
-                .await
-                .is_ok();
-                return (GuardianReviewSessionOutcome::Aborted, keep_review_session, false);
+        };
+        match event {
+            Ok(event) if !event_matches_turn(&event, expected_turn_id) => {}
+            Ok(event) if matches!(&event.msg, EventMsg::ItemCompleted(_)) => {
+                review_session.admit_node_repl_evidence(&event).await;
             }
-            event = review_session.io.next_event() => {
-                match event {
-                    Ok(event) if !event_matches_turn(&event, expected_turn_id) => {}
-                    Ok(event) if matches!(&event.msg, EventMsg::ItemCompleted(_)) => {
-                        review_session.admit_node_repl_evidence(&event).await;
-                    }
-                    Ok(event) => match event.msg {
-                        EventMsg::TurnComplete(turn_complete) => {
-                            analytics_result.time_to_first_token_ms = turn_complete
-                                .time_to_first_token_ms
-                                .and_then(|ms| u64::try_from(ms).ok());
-                            if turn_complete.last_agent_message.is_none()
-                                && let Some(error) = last_error
-                            {
-                                return (
-                                    GuardianReviewSessionOutcome::SessionFailed {
-                                        error: anyhow!(error.message),
-                                        error_info: error.codex_error_info,
-                                    },
-                                    true,
-                                    true,
-                                );
-                            }
-                            return (
-                                GuardianReviewSessionOutcome::Completed(Ok(turn_complete.last_agent_message)),
-                                true,
-                                true,
-                            );
-                        }
-                        EventMsg::Error(error) => {
-                            last_error = Some(error);
-                        }
-                        EventMsg::TurnAborted(_) => {
-                            return (GuardianReviewSessionOutcome::Aborted, true, false);
-                        }
-                        _ => {}
-                    },
-                    Err(err) => {
+            Ok(event) => match event.msg {
+                EventMsg::TurnComplete(turn_complete) => {
+                    analytics_result.time_to_first_token_ms = turn_complete
+                        .time_to_first_token_ms
+                        .and_then(|ms| u64::try_from(ms).ok());
+                    if turn_complete.last_agent_message.is_none()
+                        && let Some(error) = last_error
+                    {
                         return (
-                            GuardianReviewSessionOutcome::Completed(Err(err.into())),
-                            false,
-                            false,
+                            GuardianReviewSessionOutcome::SessionFailed {
+                                error: anyhow!(error.message),
+                                error_info: error.codex_error_info,
+                            },
+                            true,
+                            true,
                         );
                     }
+                    return (
+                        GuardianReviewSessionOutcome::Completed(Ok(
+                            turn_complete.last_agent_message
+                        )),
+                        true,
+                        true,
+                    );
                 }
+                EventMsg::Error(error) => {
+                    last_error = Some(error);
+                }
+                EventMsg::TurnAborted(_) => {
+                    return (GuardianReviewSessionOutcome::Aborted, true, false);
+                }
+                _ => {}
+            },
+            Err(err) => {
+                return (
+                    GuardianReviewSessionOutcome::Completed(Err(err.into())),
+                    false,
+                    false,
+                );
             }
         }
     }
@@ -1576,8 +1564,8 @@ async fn run_before_review_deadline<T>(
     future: impl Future<Output = T>,
 ) -> Result<T, GuardianReviewSessionOutcome> {
     tokio::select! {
+        biased;
         _ = tokio::time::sleep_until(deadline) => Err(GuardianReviewSessionOutcome::TimedOut),
-        result = future => Ok(result),
         _ = async {
             if let Some(cancel_token) = external_cancel {
                 cancel_token.cancelled().await;
@@ -1585,6 +1573,17 @@ async fn run_before_review_deadline<T>(
                 std::future::pending::<()>().await;
             }
         } => Err(GuardianReviewSessionOutcome::Aborted),
+        result = future => {
+            // A ready result must not win over cancellation or expiry that
+            // occurred while polling the operation.
+            if external_cancel.is_some_and(CancellationToken::is_cancelled) {
+                Err(GuardianReviewSessionOutcome::Aborted)
+            } else if tokio::time::Instant::now() >= deadline {
+                Err(GuardianReviewSessionOutcome::TimedOut)
+            } else {
+                Ok(result)
+            }
+        },
     }
 }
 
