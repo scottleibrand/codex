@@ -383,9 +383,25 @@
     },
     "AutoReviewToml": {
       "properties": {
+        "model": {
+          "description": "Model used for Guardian review.",
+          "type": "string"
+        },
+        "model_provider": {
+          "description": "Reserved provider ID used for Guardian review.",
+          "type": "string"
+        },
         "policy": {
           "description": "Additional policy instructions inserted into the guardian prompt.",
           "type": "string"
+        },
+        "reasoning_effort": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/ReasoningEffort"
+            }
+          ],
+          "description": "Reasoning effort used for Guardian review."
         }
       },
       "type": "object"
