@@ -788,7 +788,7 @@ enum ManagedPolicyChange {
 }
 
 #[test_case(ManagedPolicyChange::RequireReview; "required review changed since admission")]
-#[test_case(ManagedPolicyChange::IgnorePrefixRules; "prefix rule policy changed since admission")]
+#[test_case(ManagedPolicyChange::IgnorePrefixRules; "ignore rules change while explicit allows remain effective")]
 #[tokio::test]
 async fn activation_must_match_the_retained_turn_authority(change: ManagedPolicyChange) {
     let (mut session, mut turn) = make_session_and_context().await;
@@ -887,8 +887,9 @@ async fn activation_must_match_the_retained_turn_authority(change: ManagedPolicy
         },
     )
     .expect("build refreshed requirements");
-    // The destination satisfies today's managed policy. Only the temporary
-    // compatibility check rejects the mismatch with retained turn consumers.
+    // The destination satisfies today's managed policy. Ignore rules are no
+    // longer part of TurnContext's legacy prefix-rule policy, so changing them
+    // must not block activation or disable explicit allows.
     assert_eq!(
         session.validate_active_step_settings(&prepared, &destination, &live,),
         Ok(())
@@ -900,14 +901,12 @@ async fn activation_must_match_the_retained_turn_authority(change: ManagedPolicy
             &destination,
             &live.original_config_do_not_use,
         ),
-        Err(match change {
+        match change {
             ManagedPolicyChange::RequireReview => {
-                "the destination changes model-required approval authority".to_string()
+                Err("the destination changes model-required approval authority".to_string())
             }
-            ManagedPolicyChange::IgnorePrefixRules => {
-                "the destination changes the admitted prefix-rule policy".to_string()
-            }
-        })
+            ManagedPolicyChange::IgnorePrefixRules => Ok(()),
+        }
     );
 }
 
