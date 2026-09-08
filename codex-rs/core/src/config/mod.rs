@@ -24,6 +24,7 @@ use codex_config::ResidencyRequirement;
 use codex_config::SandboxModeRequirement;
 use codex_config::Sourced;
 use codex_config::ThreadConfigLoader;
+use codex_config::config_toml::AutoReviewToml;
 use codex_config::config_toml::ConfigToml;
 use codex_config::config_toml::DEFAULT_PROJECT_DOC_MAX_BYTES;
 use codex_config::config_toml::ProjectConfig;
@@ -164,6 +165,7 @@ use toml_edit::DocumentMut;
 
 mod auth_keyring;
 pub mod edit;
+mod guardian_reviewer;
 mod managed_features;
 mod metrics;
 mod network_proxy_spec;
@@ -645,6 +647,9 @@ pub struct Config {
 
     /// Info needed to make an API request to the model.
     pub model_provider: ModelProviderInfo,
+
+    /// Merged Guardian reviewer configuration.
+    pub auto_review: Option<AutoReviewToml>,
 
     /// Optionally specify the personality of the model
     pub personality: Option<Personality>,
@@ -4273,6 +4278,7 @@ impl Config {
                 .unwrap_or_default(),
             model_provider_id,
             model_provider,
+            auto_review: cfg.auto_review.clone(),
             cwd: resolved_cwd,
             workspace_roots: workspace_roots.clone(),
             workspace_roots_explicit,
@@ -4925,6 +4931,10 @@ pub fn log_dir(cfg: &Config) -> std::io::Result<PathBuf> {
 #[cfg(test)]
 #[path = "config_tests.rs"]
 mod tests;
+
+pub use guardian_reviewer::GuardianReviewerConfig;
+pub use guardian_reviewer::is_trusted_reviewer_provider;
+pub use guardian_reviewer::resolve_guardian_reviewer;
 
 #[cfg(test)]
 #[path = "config_loader_tests.rs"]

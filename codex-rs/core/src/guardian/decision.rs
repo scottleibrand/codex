@@ -69,6 +69,10 @@ pub(crate) async fn decide_approval(
             .can_set(&codex_protocol::config_types::ApprovalsReviewer::User)
             .is_err();
     let require_fresh_review = options.require_synchronous_review
+        || !crate::config::is_trusted_reviewer_provider(
+            &turn.config.model_provider_id,
+            &turn.config.model_provider,
+        )
         || model_requires_review
             && !turn
                 .config
