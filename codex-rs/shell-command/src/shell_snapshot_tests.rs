@@ -68,6 +68,31 @@ fn bash_snapshot_preserves_multiline_exports() -> Result<()> {
     Ok(())
 }
 
+#[test]
+fn bash_snapshot_does_not_source_bashrc() -> Result<()> {
+    let home = tempdir()?;
+    let marker = home.path().join("bashrc-was-sourced");
+    std::fs::write(
+        home.path().join(".bashrc"),
+        format!("touch {}", marker.display()),
+    )?;
+
+    let output = Command::new("/bin/bash")
+        .arg("-c")
+        .arg(snapshot_script(ShellType::Bash).expect("bash supports snapshots"))
+        .env("HOME", home.path())
+        .env_remove("BASH_ENV")
+        .output()?;
+
+    assert!(output.status.success());
+    assert!(
+        !marker.exists(),
+        "shell snapshots must not execute ~/.bashrc"
+    );
+
+    Ok(())
+}
+
 #[cfg(target_os = "macos")]
 #[test]
 fn zsh_snapshot_restores_tied_path() -> Result<()> {
