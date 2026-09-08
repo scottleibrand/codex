@@ -50,3 +50,11 @@ If `model_providers.amazon-bedrock.aws.credential_export` is configured, Bedrock
 Bedrock login return an error without changing configuration or saved credentials. Remove the
 exporter configuration before selecting another credential source. `aws.credential_export` and
 `aws.profile` cannot be configured together.
+### Effective sampling settings
+
+`turn/samplingSettingsEffective` reports the model provider, model, and reasoning
+effort captured at a root thread sampling request boundary. The notification includes
+`rootTurnId`, `samplingRequestId`, and a zero-based `attempt` counter so clients can
+distinguish retries from subsequent requests. It describes the request sent by Codex;
+it does not attest to provider-side model routing. These notifications are ephemeral
+and are not restored from rollout history.

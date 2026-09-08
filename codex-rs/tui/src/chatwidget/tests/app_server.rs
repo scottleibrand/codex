@@ -653,6 +653,7 @@ async fn effective_sampling_notification_switches_active_model_once() {
         .map(|lines| lines_to_single_string(&lines))
         .collect::<String>();
     assert!(rendered.contains("Active model changed to gpt-5.4 high"));
+    assert_chatwidget_snapshot!("effective_sampling_model_transition", rendered);
 }
 
 #[tokio::test]

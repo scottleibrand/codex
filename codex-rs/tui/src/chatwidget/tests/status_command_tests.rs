@@ -138,6 +138,12 @@ async fn status_command_distinguishes_selected_and_effective_models() {
     assert!(rendered.contains("gpt-5.2"));
     assert!(rendered.contains("Selected model:"));
     assert!(rendered.contains("gpt-5.4"));
+    let model_lines = rendered
+        .lines()
+        .filter(|line| line.contains("Effective model:") || line.contains("Selected model:"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert_chatwidget_snapshot!("status_selected_and_effective_models", model_lines);
 }
 
 #[tokio::test]
