@@ -78,6 +78,7 @@ mod guardian_context_budget;
 mod guardian_history;
 mod guardian_mcp_elicitation;
 mod guardian_provider;
+mod guardian_reviewer;
 mod guardian_retained_context;
 #[cfg(not(target_os = "windows"))]
 mod guardian_review;
