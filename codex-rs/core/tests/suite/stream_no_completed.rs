@@ -461,4 +461,3 @@ async fn retries_when_transport_keepalives_have_no_response_events() {
     keepalive_task.abort();
     server.shutdown().await;
 }
-
