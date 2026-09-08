@@ -1,4 +1,4 @@
-//! The production synchronous reviewer's output schema and tolerant JSON parser.
+//! The production synchronous reviewer's output schema and strict JSON parser.
 //! Parsing defaults and error text are shared unchanged by all reviewer callers.
 
 use codex_protocol::protocol::GuardianAssessmentOutcome;
@@ -17,25 +17,15 @@ pub struct GuardianAssessment {
     pub rationale: String,
 }
 
-/// The model is asked for strict JSON, but we still accept a surrounding prose
-/// wrapper so transient formatting drift fails less noisily during dogfooding.
-/// Non-JSON output is still a review failure; this is only a thin recovery path
-/// for cases where the model wrapped the JSON in extra prose.
+/// Only a complete JSON assessment object can authorize an action.
 pub fn parse_guardian_assessment(text: Option<&str>) -> anyhow::Result<GuardianAssessment> {
     let Some(text) = text else {
         anyhow::bail!("guardian review completed without an assessment payload");
     };
-    let parsed_payload =
-        if let Ok(payload) = serde_json::from_str::<GuardianAssessmentPayload>(text) {
-            payload
-        } else if let (Some(start), Some(end)) = (text.find('{'), text.rfind('}'))
-            && start < end
-            && let Some(slice) = text.get(start..=end)
-        {
-            serde_json::from_str::<GuardianAssessmentPayload>(slice)?
-        } else {
-            anyhow::bail!("guardian assessment was not valid JSON");
-        };
+    if !text.trim_start().starts_with('{') {
+        anyhow::bail!("guardian assessment must be a JSON object");
+    }
+    let parsed_payload = serde_json::from_str::<GuardianAssessmentPayload>(text)?;
 
     let outcome = parsed_payload.outcome;
     let risk_level = parsed_payload.risk_level.unwrap_or(match outcome {
@@ -65,6 +55,7 @@ pub fn parse_guardian_assessment(text: Option<&str>) -> anyhow::Result<GuardianA
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct GuardianAssessmentPayload {
     risk_level: Option<GuardianRiskLevel>,
     user_authorization: Option<GuardianUserAuthorization>,

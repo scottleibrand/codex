@@ -2,9 +2,9 @@ use super::*;
 use pretty_assertions::assert_eq;
 
 #[test]
-fn parse_guardian_assessment_extracts_embedded_json() {
+fn parse_guardian_assessment_accepts_complete_json() {
     let parsed = parse_guardian_assessment(Some(
-        "preface {\"risk_level\":\"medium\",\"user_authorization\":\"low\",\"outcome\":\"allow\",\"rationale\":\"ok\"}",
+        "  {\"risk_level\":\"medium\",\"user_authorization\":\"low\",\"outcome\":\"allow\",\"rationale\":\"ok\"}",
     ))
     .expect("guardian assessment");
 
