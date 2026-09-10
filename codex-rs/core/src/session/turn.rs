@@ -28,6 +28,7 @@ use crate::mentions::collect_explicit_app_ids;
 use crate::mentions::collect_explicit_plugin_mentions;
 use crate::mentions::collect_tool_mentions_from_messages;
 use crate::plugins::build_plugin_injections;
+use crate::responses_metadata::AutoCompactionMetadata;
 use crate::responses_metadata::CodexResponsesMetadata;
 use crate::responses_metadata::CodexResponsesRequestKind;
 use crate::responses_retry::ResponsesStreamRequest;
@@ -122,7 +123,6 @@ use codex_tools::DiscoverableTool;
 use codex_tools::ToolName;
 use codex_tools::filter_request_plugin_install_discoverable_tools_for_client;
 use codex_utils_path_uri::PathUri;
-use codex_utils_output_truncation::approx_token_count;
 use codex_utils_stream_parser::AssistantTextChunk;
 use codex_utils_stream_parser::AssistantTextStreamParser;
 use codex_utils_stream_parser::ProposedPlanSegment;
@@ -841,24 +841,6 @@ fn turn_user_input(input: &[TurnInput]) -> Vec<UserInput> {
         .collect()
 }
 
-fn estimate_turn_input_tokens(input: &[TurnInput]) -> i64 {
-    const TURN_INPUT_SERIALIZATION_FALLBACK_TOKENS: i64 = 16_384;
-    match serde_json::to_string(input) {
-        Ok(serialized) => i64::try_from(approx_token_count(&serialized))
-            .unwrap_or(TURN_INPUT_SERIALIZATION_FALLBACK_TOKENS)
-            .saturating_mul(2)
-            .max(TURN_INPUT_SERIALIZATION_FALLBACK_TOKENS),
-        Err(error) => {
-            warn!(
-                %error,
-                fallback_tokens = TURN_INPUT_SERIALIZATION_FALLBACK_TOKENS,
-                "failed to serialize pending turn input for post-compaction headroom"
-            );
-            TURN_INPUT_SERIALIZATION_FALLBACK_TOKENS
-        }
-    }
-}
-
 async fn required_mcp_servers_for_input(
     sess: &Arc<Session>,
     turn_context: &TurnContext,
@@ -1426,8 +1408,7 @@ async fn run_auto_compact(
                 fallback_step_context,
                 client_session,
                 initial_context_injection,
-                reason,
-                phase,
+                AutoCompactionMetadata::new(reason, phase, /*post_compaction_input_tokens*/ 0),
             )
             .await?;
         }

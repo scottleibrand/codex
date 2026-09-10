@@ -133,14 +133,6 @@ impl AutoCompactionMetadata {
         )
         .with_post_compaction_input_tokens(self.post_compaction_input_tokens)
     }
-
-    pub(crate) fn reason(self) -> CompactionReason {
-        self.reason
-    }
-
-    pub(crate) fn phase(self) -> CompactionPhase {
-        self.phase
-    }
 }
 
 /// Metadata attached to model requests whose purpose is conversation compaction.
