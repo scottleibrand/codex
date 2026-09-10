@@ -18,6 +18,7 @@ use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::ExecCommandOutputDeltaEvent;
 use codex_protocol::protocol::ExecOutputStream;
 use codex_sandboxing::SandboxType;
+use codex_utils_path_uri::PathUri;
 
 use pretty_assertions::assert_eq;
 use tokio::time::Duration;
@@ -299,12 +300,10 @@ async fn exit_watcher_bounds_interaction_lock_wait_after_exit() -> anyhow::Resul
 
     tokio::time::pause();
     #[allow(deprecated)]
-    let cwd = context.step_context.turn.cwd.clone().into();
+    let cwd: PathUri = context.step_context.turn.cwd.clone().into();
     spawn_exit_watcher(
         Arc::clone(&process),
-        Arc::clone(&context.session),
-        Arc::clone(&context.step_context.turn),
-        context.call_id,
+        &context,
         vec!["proof".to_string()],
         cwd,
         /*process_id*/ 123,

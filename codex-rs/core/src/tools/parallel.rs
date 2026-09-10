@@ -549,6 +549,7 @@ mod tests {
         session
             .record_conversation_items(
                 &turn_context,
+                turn_context.model_info(),
                 &[
                     function_call("wait_agent", arguments, "call-1"),
                     function_output("call-1"),

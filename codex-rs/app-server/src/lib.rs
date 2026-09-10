@@ -1512,8 +1512,8 @@ mod tests {
     use super::ShutdownState;
     #[cfg(debug_assertions)]
     use super::loader_overrides_with_test_user_config_file;
-    use super::turn_admission::TurnAdmission;
     use super::should_install_cloud_config_bundle_loader;
+    use super::turn_admission::TurnAdmission;
     #[cfg(debug_assertions)]
     use codex_config::LoaderOverrides;
     use codex_model_provider::AMAZON_BEDROCK_PROVIDER_ID;

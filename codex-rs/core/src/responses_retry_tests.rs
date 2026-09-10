@@ -29,7 +29,7 @@ fn high_demand_uses_unbounded_interactive_retries_on_bedrock() {
     assert!(err.is_retryable());
     assert_eq!(
         err.to_string(),
-        "We're currently experiencing high demand, which may cause temporary errors."
+        "We’re currently experiencing high demand, which may cause temporary errors."
     );
 }
 

@@ -33,6 +33,7 @@ use codex_exec_server::LOCAL_FS;
 use codex_features::Feature;
 use codex_guardian_context::ConversationTranscriptEntry;
 use codex_guardian_context::ConversationTranscriptEntryKind;
+use codex_guardian_reviewer::GuardianAssessment;
 use codex_history::RolloutItem;
 use codex_model_provider::create_model_provider;
 use codex_model_provider_info::AMAZON_BEDROCK_GPT_5_4_MODEL_ID;

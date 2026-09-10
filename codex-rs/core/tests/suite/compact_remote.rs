@@ -18,6 +18,7 @@ use codex_model_provider_info::ModelProviderInfo;
 use codex_protocol::AgentPath;
 use codex_protocol::models::ContentItem;
 use codex_protocol::models::ResponseItem;
+use codex_protocol::openai_models::InputModality;
 use codex_protocol::protocol::ConversationStartParams;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::InterAgentCommunication;
