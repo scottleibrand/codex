@@ -11,7 +11,14 @@ pub(crate) fn model_display_name(model: &str) -> &str {
     if model.eq_ignore_ascii_case(LUNA_RESERVE_MODEL) {
         "Luna Reserve"
     } else {
-        model
+        let slug = model.rsplit('/').next().unwrap_or(model);
+        if slug.eq_ignore_ascii_case("glm-5p3-flash") {
+            "GLM 5.3 Flash"
+        } else if slug.eq_ignore_ascii_case("glm-5p3") {
+            "GLM 5.3"
+        } else {
+            model
+        }
     }
 }
 
@@ -36,5 +43,22 @@ impl ModelCatalog {
 
     pub(crate) fn try_list_models(&self) -> Result<Vec<ModelPreset>, Infallible> {
         Ok(self.models.clone())
+    }
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn model_display_name_maps_fireworks_slugs() {
+        assert_eq!(
+            model_display_name("accounts/fireworks/models/glm-5p3-flash"),
+            "GLM 5.3 Flash"
+        );
+        assert_eq!(
+            model_display_name("accounts/fireworks/models/glm-5p3"),
+            "GLM 5.3"
+        );
+        assert_eq!(model_display_name("glm-5p3-flash"), "GLM 5.3 Flash");
+        assert_eq!(model_display_name("gpt-5.6-luna"), "gpt-5.6-luna");
     }
 }

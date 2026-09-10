@@ -67,4 +67,12 @@ fn thread_usage_model_names_match_desktop_display_names() {
     assert_eq!(format_model_display_name("gpt-5-mini"), "GPT-5 Mini");
     assert_eq!(format_model_display_name("gpt-5.6-sol"), "GPT-5.6 Sol");
     assert_eq!(format_model_display_name("examplemodel"), "examplemodel");
+    assert_eq!(
+        format_model_display_name("accounts/fireworks/models/glm-5p3-flash"),
+        "GLM 5.3 Flash"
+    );
+    assert_eq!(
+        format_model_display_name("accounts/fireworks/models/glm-5p3"),
+        "GLM 5.3"
+    );
 }
