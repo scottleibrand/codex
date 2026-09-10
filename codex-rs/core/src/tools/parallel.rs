@@ -4,6 +4,8 @@ use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 use std::time::Instant;
 
+use sha1::Digest;
+use sha1::Sha1;
 use tokio::sync::RwLock;
 use tokio::task::JoinError;
 use tokio_util::either::Either;
@@ -28,6 +30,9 @@ use crate::tools::router::ToolCallSource;
 use codex_history::ResponseItemEnvelope;
 use codex_protocol::error::CodexErr;
 use codex_protocol::models::ResponseInputItem;
+use codex_protocol::models::ResponseItem;
+
+const MAX_IDENTICAL_MALFORMED_TOOL_CALLS: usize = 3;
 
 struct ToolCallTimingGuard {
     started_at: Instant,
@@ -77,12 +82,48 @@ impl ToolCallRuntime {
         cancellation_token: CancellationToken,
     ) -> impl std::future::Future<Output = Result<ResponseItemEnvelope, CodexErr>> {
         let error_call = call.clone();
+        let error_session = Arc::clone(&self.session);
         let source = call.direct_source();
         let future = self.handle_tool_call_with_source(call, source, cancellation_token);
         async move {
             match future.await {
                 Ok(response) => Ok(response.into_response()),
                 Err(FunctionCallError::Fatal(message)) => Err(CodexErr::Fatal(message)),
+                Err(FunctionCallError::MalformedArguments(message)) => {
+                    let occurrences =
+                        identical_function_call_count(error_session.as_ref(), &error_call).await;
+                    let arguments = match &error_call.payload {
+                        ToolPayload::Function { arguments } => arguments.as_str(),
+                        _ => "",
+                    };
+                    let fingerprint = format!("{:x}", Sha1::digest(arguments.as_bytes()));
+                    let fingerprint = &fingerprint[..12];
+                    tracing::warn!(
+                        tool_name = %error_call.tool_name,
+                        call_id = %error_call.call_id,
+                        argument_bytes = arguments.len(),
+                        argument_fingerprint = fingerprint,
+                        identical_occurrences = occurrences,
+                        "model emitted malformed function arguments"
+                    );
+                    if occurrences >= MAX_IDENTICAL_MALFORMED_TOOL_CALLS {
+                        Err(CodexErr::Fatal(format!(
+                            "model repeatedly emitted identical malformed arguments for tool {} \
+                             ({} attempts, {} bytes, fingerprint {fingerprint})",
+                            error_call.tool_name,
+                            occurrences,
+                            arguments.len(),
+                        )))
+                    } else {
+                        Ok(ResponseItemEnvelope::new(
+                            Self::failure_response(
+                                error_call,
+                                FunctionCallError::RespondToModel(message),
+                            )
+                            .into(),
+                        ))
+                    }
+                }
                 Err(other) => Ok(ResponseItemEnvelope::new(
                     Self::failure_response(error_call, other).into(),
                 )),
@@ -202,6 +243,43 @@ impl ToolCallRuntime {
         }
         .in_current_span()
     }
+}
+
+async fn identical_function_call_count(session: &Session, call: &ToolCall) -> usize {
+    let history = session.clone_history().await;
+    identical_function_call_count_in_items(history.raw_items(), call)
+}
+
+fn identical_function_call_count_in_items<'a>(
+    items: impl DoubleEndedIterator<Item = &'a ResponseItem>,
+    call: &ToolCall,
+) -> usize {
+    let ToolPayload::Function { arguments } = &call.payload else {
+        return 0;
+    };
+    items
+        .rev()
+        .take_while(|item| {
+            !matches!(
+                item,
+                ResponseItem::Message { role, .. } if role == "user"
+            )
+        })
+        .filter(|item| {
+            matches!(
+                item,
+                ResponseItem::FunctionCall {
+                    name,
+                    namespace,
+                    arguments: candidate_arguments,
+                    ..
+                } if codex_tools::ToolName::new(namespace.clone(), name)
+                    .with_default_namespace()
+                    == call.tool_name
+                    && candidate_arguments == arguments
+            )
+        })
+        .count()
 }
 
 impl ToolCallRuntime {
@@ -357,6 +435,7 @@ mod tests {
     use crate::tools::router::ToolRouter;
     use crate::turn_diff_tracker::TurnDiffTracker;
     use codex_extension_api::ToolCallOutcome;
+    use codex_protocol::models::ContentItem;
     use codex_protocol::models::FunctionCallOutputBody;
     use codex_protocol::models::FunctionCallOutputPayload;
     use codex_protocol::openai_models::ToolMode;
@@ -364,6 +443,152 @@ mod tests {
     use tokio::sync::Notify;
     use tokio::sync::oneshot;
     use tracing_test::internal::MockWriter;
+
+    fn function_call(name: &str, arguments: &str, call_id: &str) -> ResponseItem {
+        ResponseItem::FunctionCall {
+            id: None,
+            name: name.to_string(),
+            namespace: None,
+            arguments: arguments.to_string(),
+            encrypted_function_args: None,
+            call_id: call_id.to_string(),
+            internal_chat_message_metadata_passthrough: None,
+        }
+    }
+
+    fn function_output(call_id: &str) -> ResponseItem {
+        ResponseItem::FunctionCallOutput {
+            id: None,
+            call_id: Some(call_id.to_string()),
+            name: None,
+            namespace: None,
+            output: FunctionCallOutputPayload::from_text("parse error".to_string()),
+            internal_chat_message_metadata_passthrough: None,
+        }
+    }
+
+    fn user_message() -> ResponseItem {
+        ResponseItem::Message {
+            id: None,
+            role: "user".to_string(),
+            content: Vec::<ContentItem>::new(),
+            phase: None,
+            internal_chat_message_metadata_passthrough: None,
+        }
+    }
+
+    fn wait_call(arguments: &str) -> ToolCall {
+        ToolCall {
+            tool_name: codex_tools::ToolName::plain("wait_agent").with_default_namespace(),
+            call_id: "current-call".to_string(),
+            payload: ToolPayload::Function {
+                arguments: arguments.to_string(),
+            },
+            encrypted_function_args: None,
+        }
+    }
+
+    #[test]
+    fn identical_malformed_calls_count_across_tool_outputs() {
+        let arguments = r#"{"targets":["agent-1"]} trailing"#;
+        let items = [
+            function_call("wait_agent", arguments, "call-1"),
+            function_output("call-1"),
+            function_call("wait_agent", arguments, "call-2"),
+            function_output("call-2"),
+            function_call("wait_agent", arguments, "call-3"),
+        ];
+
+        assert_eq!(
+            identical_function_call_count_in_items(items.iter(), &wait_call(arguments)),
+            MAX_IDENTICAL_MALFORMED_TOOL_CALLS
+        );
+    }
+
+    #[test]
+    fn unrelated_calls_do_not_contribute_to_malformed_repeat_limit() {
+        let arguments = r#"{"targets":["agent-1"]} trailing"#;
+        let items = [
+            function_call("wait_agent", arguments, "call-1"),
+            function_output("call-1"),
+            function_call("send_message", arguments, "call-2"),
+            function_output("call-2"),
+            function_call(
+                "wait_agent",
+                r#"{"targets":["agent-2"]} trailing"#,
+                "call-3",
+            ),
+        ];
+
+        assert_eq!(
+            identical_function_call_count_in_items(items.iter(), &wait_call(arguments)),
+            1
+        );
+    }
+
+    #[test]
+    fn user_message_resets_malformed_repeat_window() {
+        let arguments = r#"{"targets":["agent-1"]} trailing"#;
+        let items = [
+            function_call("wait_agent", arguments, "old-call"),
+            function_output("old-call"),
+            user_message(),
+            function_call("wait_agent", arguments, "current-call"),
+        ];
+
+        assert_eq!(
+            identical_function_call_count_in_items(items.iter(), &wait_call(arguments)),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn third_identical_malformed_call_fails_closed() {
+        let arguments = r#"{"targets":["agent-1"]} trailing"#;
+        let (session, turn_context) = crate::session::tests::make_session_and_context().await;
+        session
+            .record_conversation_items(
+                &turn_context,
+                turn_context.model_info(),
+                &[
+                    function_call("wait_agent", arguments, "call-1"),
+                    function_output("call-1"),
+                    function_call("wait_agent", arguments, "call-2"),
+                    function_output("call-2"),
+                    function_call("wait_agent", arguments, "call-3"),
+                ],
+            )
+            .await;
+        let session = Arc::new(session);
+        let turn_context = Arc::new(turn_context);
+        let tool_name = codex_tools::ToolName::plain("wait_agent").with_default_namespace();
+        let handler = Arc::new(MalformedArgumentsHandler {
+            tool_name: tool_name.clone(),
+        }) as Arc<dyn CoreToolRuntime>;
+        let step_context = StepContext::for_test(turn_context);
+        let router = Arc::new(ToolRouter::from_parts(
+            ToolRegistry::from_tools([handler]),
+            Vec::new(),
+            ToolMode::Direct,
+            BTreeMap::new(),
+            /*tool_namespaces_info*/ None,
+            &[],
+        ));
+        let step_context = step_context.with_tool_router_for_test(router);
+        let tracker = Arc::new(tokio::sync::Mutex::new(TurnDiffTracker::new()));
+        let runtime = ToolCallRuntime::new(session, step_context, tracker);
+
+        let err = runtime
+            .handle_tool_call(wait_call(arguments), CancellationToken::new())
+            .await
+            .expect_err("third identical malformed call should fail closed");
+
+        let codex_protocol::error::CodexErrorDetails::Fatal(message) = err.details() else {
+            panic!("expected fatal malformed-call error, got {}", err.details());
+        };
+        assert!(message.contains("3 attempts"));
+        assert!(message.contains("wait_agent"));
+    }
 
     #[test]
     fn tool_call_timing_guard_ignores_code_mode_source() {
@@ -522,6 +747,33 @@ mod tests {
     struct ImmediateHandler {
         tool_name: codex_tools::ToolName,
     }
+
+    struct MalformedArgumentsHandler {
+        tool_name: codex_tools::ToolName,
+    }
+
+    impl ToolExecutor<ToolInvocation> for MalformedArgumentsHandler {
+        fn tool_name(&self) -> codex_tools::ToolName {
+            self.tool_name.clone()
+        }
+
+        fn spec(&self) -> codex_tools::ToolSpec {
+            panic!("test handler spec should not be requested")
+        }
+
+        fn handle<'a>(&'a self, _invocation: ToolInvocation) -> codex_tools::ToolExecutorFuture<'a>
+        where
+            ToolInvocation: 'a,
+        {
+            Box::pin(async {
+                Err(FunctionCallError::MalformedArguments(
+                    "failed to parse function arguments".to_string(),
+                ))
+            })
+        }
+    }
+
+    impl CoreToolRuntime for MalformedArgumentsHandler {}
 
     impl ToolExecutor<ToolInvocation> for ImmediateHandler {
         fn tool_name(&self) -> codex_tools::ToolName {

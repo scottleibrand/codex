@@ -60,21 +60,29 @@ pub(crate) async fn handle_retryable_response_stream_error(
         .features
         .enabled(Feature::UnboundedConnectionRetries)
         && matches!(request, ResponsesStreamRequest::Sampling)
-        && matches!(err.details(), CodexErrorDetails::ConnectionFailed(_))
+        && is_unbounded_interactive_retry_error(
+            &err,
+            turn_context.provider.info().is_amazon_bedrock(),
+        )
         && !turn_context.session_source.is_internal()
-        && !turn_context.provider.info().is_amazon_bedrock()
     {
         let retry_delay = retry_state.connection_retry_delay;
+        retry_state.connection_retries = retry_state.connection_retries.saturating_add(1);
+        let retry_count = retry_state.connection_retries;
         warn!(
             turn_id = %turn_context.sub_id,
+            retry_count,
             error = %err,
             ?retry_delay,
-            "stream connection failed; waiting to retry"
+            "retryable interactive request failed; waiting to retry"
         );
-        sess.notify_stream_error(turn_context, "Reconnecting... waiting for network", err)
-            .await;
-        retry_state.connection_retries = retry_state.connection_retries.saturating_add(1);
-        codex_client::record_retry!(retry_state.connection_retries, retry_delay, operation);
+        sess.notify_stream_error(
+            turn_context,
+            unbounded_retry_status(retry_count, retry_delay),
+            err,
+        )
+        .await;
+        codex_client::record_retry!(retry_count, retry_delay, operation);
         tokio::time::sleep(retry_delay).await;
         retry_state.connection_retry_delay = retry_delay
             .saturating_mul(2)
@@ -126,6 +134,17 @@ pub(crate) async fn handle_retryable_response_stream_error(
     }
 
     Err(err)
+}
+
+fn is_unbounded_interactive_retry_error(err: &CodexErr, is_amazon_bedrock: bool) -> bool {
+    matches!(
+        err.details(),
+        CodexErrorDetails::ResponseStreamSetupTimeout(_) | CodexErrorDetails::InternalServerError
+    ) || (!is_amazon_bedrock && matches!(err.details(), CodexErrorDetails::ConnectionFailed(_)))
+}
+
+fn unbounded_retry_status(retry_count: u64, retry_delay: Duration) -> String {
+    format!("Reconnecting... retry {retry_count} (waiting {retry_delay:?})")
 }
 
 fn log_retry(

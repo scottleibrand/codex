@@ -14,6 +14,7 @@ use crate::cell_actor::CellState;
 use crate::cell_actor::CompletionCommit;
 use crate::runtime::RuntimeCommand;
 use crate::session_runtime::CellEvent;
+use crate::session_runtime::CellId;
 use crate::session_runtime::ToolKind;
 use crate::session_runtime::ToolName;
 
@@ -56,6 +57,7 @@ async fn tool_callback_panic_rejects_the_js_promise_and_reports_failure() {
     let (runtime_tx, runtime_rx) = std_mpsc::channel();
     let (failure_tx, mut failure_rx) = mpsc::unbounded_channel();
     spawn_tool(
+        CellId::new("test-cell"),
         &mut tasks,
         Arc::new(PanickingCallbackHost),
         CellToolCall {

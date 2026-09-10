@@ -526,7 +526,7 @@ impl CoreToolRuntime for ExecCommandHandler {
             .ok()
             .map(|args| PreToolUsePayload {
                 tool_name: HookToolName::bash(),
-                tool_input: serde_json::json!({ "command": args.cmd }),
+                tool_input: exec_command_pre_tool_use_input(args),
             })
     }
 
@@ -558,6 +558,26 @@ impl CoreToolRuntime for ExecCommandHandler {
     ) -> Option<PostToolUsePayload> {
         post_unified_exec_tool_use_payload(invocation, result)
     }
+}
+
+pub(super) fn exec_command_pre_tool_use_input(args: ExecCommandArgs) -> serde_json::Value {
+    let mut tool_input = serde_json::json!({ "command": args.cmd });
+    let Some(fields) = tool_input.as_object_mut() else {
+        unreachable!("exec command hook input is always an object");
+    };
+    if let Some(sandbox_permissions) = args.sandbox_permissions {
+        fields.insert(
+            "sandbox_permissions".to_string(),
+            serde_json::json!(sandbox_permissions),
+        );
+    }
+    if let Some(justification) = args.justification {
+        fields.insert(
+            "justification".to_string(),
+            serde_json::Value::String(justification),
+        );
+    }
+    tool_input
 }
 
 fn emit_unified_exec_tty_metric(session_telemetry: &SessionTelemetry, tty: bool) {

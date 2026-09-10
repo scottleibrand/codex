@@ -126,7 +126,10 @@ fn sanitize_json_schema(value: &mut JsonValue) {
                     schema_types.push(JsonSchemaPrimitiveType::Object);
                 } else if map.contains_key("items") || map.contains_key("prefixItems") {
                     schema_types.push(JsonSchemaPrimitiveType::Array);
-                } else if map.contains_key("enum") || map.contains_key("format") {
+                } else if map.contains_key("enum")
+                    || map.contains_key("format")
+                    || map.contains_key("maxLength")
+                {
                     schema_types.push(JsonSchemaPrimitiveType::String);
                 } else if map.contains_key("minimum")
                     || map.contains_key("maximum")

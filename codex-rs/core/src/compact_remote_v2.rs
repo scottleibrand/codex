@@ -20,6 +20,7 @@ use crate::hook_runtime::PostCompactHookOutcome;
 use crate::hook_runtime::PreCompactHookOutcome;
 use crate::hook_runtime::run_post_compact_hooks;
 use crate::hook_runtime::run_pre_compact_hooks;
+use crate::responses_metadata::AutoCompactionMetadata;
 use crate::responses_metadata::CodexResponsesMetadata;
 use crate::responses_metadata::CompactionTurnMetadata;
 use crate::responses_retry::ResponsesStreamRequest;
@@ -38,6 +39,8 @@ use codex_context_fragments::to_annotated_content;
 use codex_features::Feature;
 use codex_history::CodexHarnessMetadata;
 use codex_history::ResponseItemEnvelope;
+use codex_model_provider_info::AMAZON_BEDROCK_PROVIDER_ID;
+use codex_model_provider_info::AMAZON_BEDROCK_RUNTIME_PROVIDER_ID;
 use codex_protocol::error::CodexErr;
 use codex_protocol::error::CodexErrorDetails;
 use codex_protocol::error::Result as CodexResult;
@@ -49,13 +52,16 @@ use codex_protocol::models::ResponseItem;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::TokenUsage;
 use codex_protocol::protocol::TruncationPolicy;
+use codex_protocol::protocol::TurnContextItem;
 use codex_protocol::protocol::TurnStartedEvent;
 use codex_rollout_trace::CompactionCheckpointTracePayload;
 use codex_rollout_trace::InferenceTraceContext;
+use codex_tools::ToolSpec;
 use codex_utils_output_truncation::approx_token_count;
 use codex_utils_output_truncation::truncate_text;
 use futures::StreamExt;
 use tokio_util::sync::CancellationToken;
+use tracing::warn;
 
 #[path = "compact_remote_v2_attempt.rs"]
 mod attempt;
@@ -71,8 +77,30 @@ enum RetainedImageBudget {
     Enabled,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum CompactionImagePolicy {
+    Preserve,
+    OmitStaleBedrockImages,
+}
+
+impl CompactionImagePolicy {
+    fn for_provider(provider_id: &str) -> Self {
+        if matches!(
+            provider_id,
+            AMAZON_BEDROCK_PROVIDER_ID | AMAZON_BEDROCK_RUNTIME_PROVIDER_ID
+        ) {
+            Self::OmitStaleBedrockImages
+        } else {
+            Self::Preserve
+        }
+    }
+}
+
 pub(crate) const RETAINED_MESSAGE_TOKEN_BUDGET: usize = 64_000;
 const MAX_RETAINED_AGENT_MESSAGE_TOKENS: i64 = 10_000;
+const MAX_REQUIRED_POST_COMPACTION_HEADROOM_TOKENS: i64 = 64_000;
+pub(crate) const POST_COMPACTION_REQUEST_ENVELOPE_TOKENS: i64 = 8_192;
+const OMITTED_IMAGE_PLACEHOLDER: &str = "[Image omitted after compaction]";
 // Compact attempts can run much longer than normal turns, so keep the per-transport
 // retry budget smaller than the general Responses stream retry budget.
 const MAX_REMOTE_COMPACTION_V2_STREAM_RETRIES: u64 = 2;
@@ -83,15 +111,10 @@ pub(crate) async fn run_inline_remote_auto_compact_task(
     fallback_step_context: Option<Arc<StepContext>>,
     client_session: &mut ModelClientSession,
     initial_context_injection: InitialContextInjection,
-    reason: CompactionReason,
-    phase: CompactionPhase,
+    auto_compaction_metadata: AutoCompactionMetadata,
 ) -> CodexResult<()> {
-    let compaction_metadata = CompactionTurnMetadata::new(
-        CompactionTrigger::Auto,
-        reason,
-        CompactionImplementation::ResponsesCompactionV2,
-        phase,
-    );
+    let compaction_metadata = auto_compaction_metadata
+        .into_turn_metadata(CompactionImplementation::ResponsesCompactionV2);
     run_remote_compact_task_inner(
         &sess,
         &step_context,
@@ -248,8 +271,8 @@ async fn run_remote_compact_task_inner_impl(
         analytics_details,
     )
     .await;
-    let (attempt, compaction_turn_context) = match attempt {
-        Ok(attempt) => (attempt, turn_context),
+    let (attempt, compaction_step_context) = match attempt {
+        Ok(attempt) => (attempt, step_context),
         Err(error) => {
             let Some(fallback_step_context) = fallback_step_context else {
                 return Err(error);
@@ -285,11 +308,12 @@ async fn run_remote_compact_task_inner_impl(
                 fallback_result.as_ref().err(),
             );
             match fallback_result {
-                Ok(attempt) => (attempt, fallback_turn_context),
+                Ok(attempt) => (attempt, fallback_step_context),
                 Err(_) => return Err(error),
             }
         }
     };
+    let compaction_turn_context = &compaction_step_context.turn;
     let RemoteCompactV2Attempt {
         trace_input_history,
         prompt_input,
@@ -311,6 +335,9 @@ async fn run_remote_compact_task_inner_impl(
         prompt_input_metadata,
         compaction_output,
         sess.enabled(Feature::RetainClientDeveloperMessages),
+        CompactionImagePolicy::for_provider(
+            compaction_turn_context.config.model_provider_id.as_str(),
+        ),
         if sess.enabled(Feature::CompactionImageBudget) {
             RetainedImageBudget::Enabled
         } else {
@@ -323,13 +350,60 @@ async fn run_remote_compact_task_inner_impl(
         build_compaction_initial_context(sess.as_ref(), &initial_context_injection).await;
     let new_history =
         insert_initial_context_before_last_real_user_or_summary(compacted_history, initial_context);
-
     let reference_context_item = match initial_context_injection {
         InitialContextInjection::DoNotInject => None,
-        InitialContextInjection::BeforeLastUserMessage { step_context, .. } => {
-            Some(step_context.to_turn_context_item())
+        InitialContextInjection::BeforeLastUserMessage { .. } => {
+            Some(compaction_turn_context.to_turn_context_item())
         }
     };
+    let base_instructions = sess.get_base_instructions().await;
+    let estimated_tokens = estimate_compacted_history_tokens(
+        new_history.iter().map(|envelope| &envelope.item),
+        base_instructions.text.as_str(),
+        compaction_step_context
+            .tool_router
+            .model_visible_specs()
+            .as_ref(),
+    )
+    .saturating_add(estimate_reference_context_item_tokens(
+        reference_context_item.as_ref(),
+    ))
+    .saturating_add(compaction_metadata.post_compaction_input_tokens());
+    if let Some((context_window, required_headroom)) = insufficient_post_compaction_headroom(
+        estimated_tokens,
+        compaction_turn_context.model_context_window(),
+    ) {
+        warn!(
+            turn_id = %compaction_turn_context.sub_id,
+            estimated_tokens,
+            context_window,
+            required_headroom,
+            "remote compaction left insufficient context headroom; starting a fresh context window"
+        );
+        let world_state = match world_state_baseline {
+            Some(world_state) => world_state,
+            None => Arc::new(sess.build_world_state_for_step(step_context).await?),
+        };
+        sess.start_new_context_window(step_context, world_state)
+            .await;
+        if let Some(trace_input_history) = trace_input_history.as_deref() {
+            let replacement_history = sess
+                .clone_history()
+                .await
+                .into_annotated_items()
+                .into_iter()
+                .map(ResponseItemEnvelope::into_item)
+                .collect::<Vec<_>>();
+            compaction_trace.record_installed(&CompactionCheckpointTracePayload {
+                input_history: trace_input_history,
+                replacement_history: &replacement_history,
+            });
+        }
+        sess.emit_turn_item_completed(compaction_turn_context, compaction_item)
+            .await;
+        return Ok(());
+    }
+
     if let Some(trace_input_history) = trace_input_history.as_deref() {
         let replacement_history = new_history
             .iter()
@@ -358,6 +432,52 @@ async fn run_remote_compact_task_inner_impl(
     sess.emit_turn_item_completed(compaction_turn_context, compaction_item)
         .await;
     Ok(())
+}
+pub(crate) fn estimate_compacted_history_tokens<'a>(
+    history: impl IntoIterator<Item = &'a ResponseItem>,
+    base_instructions: &str,
+    tools: &[ToolSpec],
+) -> i64 {
+    let base_tokens = i64::try_from(approx_token_count(base_instructions)).unwrap_or(i64::MAX);
+    let tool_tokens = serde_json::to_string(tools)
+        .map(|tools| i64::try_from(approx_token_count(&tools)).unwrap_or(i64::MAX))
+        .unwrap_or(i64::MAX);
+    history
+        .into_iter()
+        .map(estimate_item_token_count)
+        .fold(base_tokens, i64::saturating_add)
+        .saturating_add(tool_tokens)
+        .saturating_add(POST_COMPACTION_REQUEST_ENVELOPE_TOKENS)
+}
+pub(crate) fn insufficient_post_compaction_headroom(
+    estimated_tokens: i64,
+    context_window: Option<i64>,
+) -> Option<(i64, i64)> {
+    let context_window = context_window?;
+    let required_headroom =
+        (context_window / 4).clamp(1, MAX_REQUIRED_POST_COMPACTION_HEADROOM_TOKENS);
+    (estimated_tokens > context_window.saturating_sub(required_headroom))
+        .then_some((context_window, required_headroom))
+}
+pub(crate) fn estimate_reference_context_item_tokens(
+    reference_context_item: Option<&TurnContextItem>,
+) -> i64 {
+    const REFERENCE_CONTEXT_SERIALIZATION_FALLBACK_TOKENS: i64 = 16_384;
+    let Some(reference_context_item) = reference_context_item else {
+        return 0;
+    };
+    match serde_json::to_string(reference_context_item) {
+        Ok(serialized) => i64::try_from(approx_token_count(&serialized))
+            .unwrap_or(REFERENCE_CONTEXT_SERIALIZATION_FALLBACK_TOKENS),
+        Err(error) => {
+            warn!(
+                %error,
+                fallback_tokens = REFERENCE_CONTEXT_SERIALIZATION_FALLBACK_TOKENS,
+                "failed to serialize reference context while estimating post-compaction headroom"
+            );
+            REFERENCE_CONTEXT_SERIALIZATION_FALLBACK_TOKENS
+        }
+    }
 }
 
 struct RemoteCompactionV2Output {
@@ -490,6 +610,7 @@ fn build_v2_compacted_history(
     prompt_input_metadata: Vec<Option<CodexHarnessMetadata>>,
     compaction_output: ResponseItem,
     retain_client_developer_messages: bool,
+    image_policy: CompactionImagePolicy,
     image_budget: RetainedImageBudget,
 ) -> (Vec<ResponseItemEnvelope>, usize) {
     debug_assert_eq!(prompt_input.len(), prompt_input_metadata.len());
@@ -498,12 +619,15 @@ fn build_v2_compacted_history(
         .zip(prompt_input_metadata)
         .map(|(item, metadata)| ResponseItemEnvelope { item, metadata })
         .collect::<Vec<_>>();
-    let retained = v2_history_item_groups(prompt_input)
+    let mut retained = v2_history_item_groups(prompt_input)
         .filter(|group| {
             is_retained_for_remote_compaction_v2(&group.source, retain_client_developer_messages)
         })
         .flat_map(HistoryItemGroup::into_items)
         .collect::<Vec<_>>();
+    if image_policy == CompactionImagePolicy::OmitStaleBedrockImages {
+        replace_input_images_with_compaction_placeholder_in_envelopes(&mut retained);
+    }
     let mut retained =
         truncate_retained_messages(retained, RETAINED_MESSAGE_TOKEN_BUDGET, image_budget);
     let retained_image_count = retained
@@ -512,6 +636,47 @@ fn build_v2_compacted_history(
         .sum::<usize>();
     retained.push(ResponseItemEnvelope::new(compaction_output));
     (retained, retained_image_count)
+}
+
+fn replace_historical_input_images_before_last_compaction(items: &mut [ResponseItem]) -> usize {
+    let Some(last_compaction_index) = items
+        .iter()
+        .rposition(|item| matches!(item, ResponseItem::Compaction { .. }))
+    else {
+        return 0;
+    };
+
+    replace_input_images_with_compaction_placeholder(&mut items[..last_compaction_index])
+}
+
+fn replace_input_images_with_compaction_placeholder_in_envelopes(
+    items: &mut [ResponseItemEnvelope],
+) -> usize {
+    let mut replaced = 0;
+    for envelope in items {
+        replaced += replace_input_images_with_compaction_placeholder(std::slice::from_mut(
+            &mut envelope.item,
+        ));
+    }
+    replaced
+}
+
+fn replace_input_images_with_compaction_placeholder(items: &mut [ResponseItem]) -> usize {
+    let mut replaced = 0;
+    for item in items {
+        let ResponseItem::Message { content, .. } = item else {
+            continue;
+        };
+        for content_item in content {
+            if matches!(content_item, ContentItem::InputImage { .. }) {
+                *content_item = ContentItem::InputText {
+                    text: OMITTED_IMAGE_PLACEHOLDER.to_string(),
+                };
+                replaced += 1;
+            }
+        }
+    }
+    replaced
 }
 
 pub(crate) fn is_client_authored_developer_message(item: &ResponseItemEnvelope) -> bool {
@@ -787,12 +952,21 @@ mod tests {
         input: Vec<ResponseItem>,
         output: ResponseItem,
     ) -> (Vec<ResponseItemEnvelope>, usize) {
+        build_without_metadata_with_policy(input, output, CompactionImagePolicy::Preserve)
+    }
+
+    fn build_without_metadata_with_policy(
+        input: Vec<ResponseItem>,
+        output: ResponseItem,
+        image_policy: CompactionImagePolicy,
+    ) -> (Vec<ResponseItemEnvelope>, usize) {
         let metadata = vec![None; input.len()];
         build_v2_compacted_history(
             input,
             metadata,
             output,
             /*retain_client_developer_messages*/ false,
+            image_policy,
             RetainedImageBudget::Disabled,
         )
     }
@@ -872,6 +1046,32 @@ mod tests {
     }
 
     #[test]
+    fn oversized_remote_compaction_requires_fresh_context_window() {
+        assert_eq!(
+            insufficient_post_compaction_headroom(242_659, Some(258_400)),
+            Some((258_400, 64_000))
+        );
+        assert_eq!(
+            insufficient_post_compaction_headroom(194_400, Some(258_400)),
+            None
+        );
+        assert_eq!(insufficient_post_compaction_headroom(1, None), None);
+    }
+
+    #[test]
+    fn compacted_history_estimate_reserves_request_and_tool_overhead() {
+        let without_tools =
+            estimate_compacted_history_tokens(std::iter::empty::<&ResponseItem>(), "", &[]);
+        let tool =
+            crate::tools::handlers::get_context_remaining_spec::create_get_context_remaining_tool();
+        let with_tools =
+            estimate_compacted_history_tokens(std::iter::empty::<&ResponseItem>(), "", &[tool]);
+
+        assert!(without_tools >= POST_COMPACTION_REQUEST_ENVELOPE_TOKENS);
+        assert!(with_tools > without_tools);
+    }
+
+    #[test]
     fn build_v2_compacted_history_preserves_retained_metadata_sidecar() {
         let retained = message("user", "keep", /*phase*/ None);
         let generated_notice = message(
@@ -910,6 +1110,7 @@ mod tests {
                 ],
                 output.clone(),
                 enabled,
+                CompactionImagePolicy::Preserve,
                 RetainedImageBudget::Disabled,
             );
             let mut expected = vec![
@@ -977,7 +1178,7 @@ mod tests {
     }
 
     #[test]
-    fn build_v2_compacted_history_counts_retained_input_images() {
+    fn build_v2_compacted_history_strips_retained_input_images() {
         let input = vec![ResponseItem::Message {
             id: None,
             role: "user".to_string(),
@@ -1003,9 +1204,148 @@ mod tests {
             internal_chat_message_metadata_passthrough: None,
         };
 
-        let (_, retained_image_count) = build_without_metadata(input, output);
+        let (_, upstream_retained_image_count) =
+            build_without_metadata(input.clone(), output.clone());
+        assert_eq!(upstream_retained_image_count, 2);
 
-        assert_eq!(retained_image_count, 2);
+        let (history, retained_image_count) = build_without_metadata_with_policy(
+            input,
+            output.clone(),
+            CompactionImagePolicy::OmitStaleBedrockImages,
+        );
+
+        assert_eq!(
+            raw(history),
+            vec![
+                ResponseItem::Message {
+                    id: None,
+                    role: "user".to_string(),
+                    content: vec![
+                        ContentItem::InputText {
+                            text: "user".to_string(),
+                        },
+                        ContentItem::InputText {
+                            text: OMITTED_IMAGE_PLACEHOLDER.to_string(),
+                        },
+                        ContentItem::InputText {
+                            text: OMITTED_IMAGE_PLACEHOLDER.to_string(),
+                        },
+                    ],
+                    phase: None,
+                    internal_chat_message_metadata_passthrough: None,
+                },
+                output,
+            ]
+        );
+        assert_eq!(retained_image_count, 0);
+    }
+
+    #[test]
+    fn repeat_compaction_strips_only_images_before_last_compaction() {
+        let image_message = |image_url: &str| ResponseItem::Message {
+            id: None,
+            role: "user".to_string(),
+            content: vec![ContentItem::InputImage {
+                image_url: image_url.to_string(),
+                detail: None,
+            }],
+            phase: None,
+            internal_chat_message_metadata_passthrough: None,
+        };
+        let current_image = image_message("data:image/png;base64,current");
+        let mut input = vec![
+            image_message("data:image/png;base64,old"),
+            ResponseItem::Compaction {
+                id: None,
+                encrypted_content: "summary".to_string(),
+                internal_chat_message_metadata_passthrough: None,
+            },
+            current_image.clone(),
+        ];
+
+        let replaced = replace_historical_input_images_before_last_compaction(&mut input);
+
+        assert_eq!(replaced, 1);
+        assert_eq!(
+            input,
+            vec![
+                message("user", OMITTED_IMAGE_PLACEHOLDER, /*phase*/ None),
+                ResponseItem::Compaction {
+                    id: None,
+                    encrypted_content: "summary".to_string(),
+                    internal_chat_message_metadata_passthrough: None,
+                },
+                current_image,
+            ]
+        );
+    }
+
+    #[test]
+    fn build_v2_compacted_history_drops_images_from_before_previous_compaction() {
+        let original = ResponseItem::Message {
+            id: None,
+            role: "user".to_string(),
+            content: vec![
+                ContentItem::InputText {
+                    text: "inspect this screenshot".to_string(),
+                },
+                ContentItem::InputImage {
+                    image_url: "data:image/png;base64,abc".to_string(),
+                    detail: None,
+                },
+            ],
+            phase: None,
+            internal_chat_message_metadata_passthrough: None,
+        };
+        let first_output = ResponseItem::Compaction {
+            id: None,
+            encrypted_content: "first".to_string(),
+            internal_chat_message_metadata_passthrough: None,
+        };
+        let (first_history, first_retained_image_count) = build_without_metadata_with_policy(
+            vec![original],
+            first_output,
+            CompactionImagePolicy::OmitStaleBedrockImages,
+        );
+        assert_eq!(first_retained_image_count, 0);
+        assert!(raw(first_history.clone()).iter().any(|item| {
+            matches!(
+                item,
+                ResponseItem::Message { content, .. }
+                    if content.iter().any(|content_item| matches!(
+                        content_item,
+                        ContentItem::InputText { text }
+                            if text == OMITTED_IMAGE_PLACEHOLDER
+                    ))
+            )
+        }));
+
+        let mut second_input = raw(first_history);
+        second_input.push(message("user", "continue", /*phase*/ None));
+        let second_output = ResponseItem::Compaction {
+            id: None,
+            encrypted_content: "second".to_string(),
+            internal_chat_message_metadata_passthrough: None,
+        };
+        let (second_history, second_retained_image_count) = build_without_metadata_with_policy(
+            second_input,
+            second_output,
+            CompactionImagePolicy::OmitStaleBedrockImages,
+        );
+
+        assert_eq!(second_retained_image_count, 0);
+        assert!(
+            second_history.iter().all(|envelope| {
+                !matches!(
+                    &envelope.item,
+                    ResponseItem::Message { content, .. }
+                        if content
+                            .iter()
+                            .any(|item| matches!(item, ContentItem::InputImage { .. }))
+                )
+            }),
+            "images retained before the previous compaction must not be reintroduced"
+        );
     }
 
     #[test]

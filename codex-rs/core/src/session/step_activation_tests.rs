@@ -1,4 +1,5 @@
 use super::*;
+use crate::config::GuardianPolicyConfig;
 use crate::guardian::BUNDLED_GUARDIAN_POLICY;
 use crate::session::handlers::submission_loop;
 use crate::session::step_context::StepContext;
@@ -787,7 +788,7 @@ enum ManagedPolicyChange {
 }
 
 #[test_case(ManagedPolicyChange::RequireReview; "required review changed since admission")]
-#[test_case(ManagedPolicyChange::IgnorePrefixRules; "prefix rule policy changed since admission")]
+#[test_case(ManagedPolicyChange::IgnorePrefixRules; "ignore rules change while explicit allows remain effective")]
 #[tokio::test]
 async fn activation_must_match_the_retained_turn_authority(change: ManagedPolicyChange) {
     let (mut session, mut turn) = make_session_and_context().await;
@@ -886,8 +887,9 @@ async fn activation_must_match_the_retained_turn_authority(change: ManagedPolicy
         },
     )
     .expect("build refreshed requirements");
-    // The destination satisfies today's managed policy. Only the temporary
-    // compatibility check rejects the mismatch with retained turn consumers.
+    // The destination satisfies today's managed policy. Ignore rules are no
+    // longer part of TurnContext's legacy prefix-rule policy, so changing them
+    // must not block activation or disable explicit allows.
     assert_eq!(
         session.validate_active_step_settings(&prepared, &destination, &live,),
         Ok(())
@@ -899,14 +901,12 @@ async fn activation_must_match_the_retained_turn_authority(change: ManagedPolicy
             &destination,
             &live.original_config_do_not_use,
         ),
-        Err(match change {
+        match change {
             ManagedPolicyChange::RequireReview => {
-                "the destination changes model-required approval authority".to_string()
+                Err("the destination changes model-required approval authority".to_string())
             }
-            ManagedPolicyChange::IgnorePrefixRules => {
-                "the destination changes the admitted prefix-rule policy".to_string()
-            }
-        })
+            ManagedPolicyChange::IgnorePrefixRules => Ok(()),
+        }
     );
 }
 
@@ -1024,9 +1024,13 @@ async fn parent_fallback_policy_uses_both_config_lifetimes(
 ) {
     let (_, turn) = make_session_and_context().await;
     let mut admitted_config = turn.config.as_ref().clone();
-    admitted_config.guardian_policy_config = admitted_policy.map(str::to_string);
+    admitted_config.guardian_policy = admitted_policy
+        .map(GuardianPolicyConfig::with_managed_override)
+        .unwrap_or_default();
     let mut live_config = admitted_config.clone();
-    live_config.guardian_policy_config = live_policy.map(str::to_string);
+    live_config.guardian_policy = live_policy
+        .map(GuardianPolicyConfig::with_managed_override)
+        .unwrap_or_default();
     let (mut admitted, mut destination) = safety_models();
     parent_review_messages(&mut admitted).policy = Some("catalog policy A".to_string());
     parent_review_messages(&mut destination).policy = Some("catalog policy B".to_string());
@@ -1050,7 +1054,7 @@ async fn parent_fallback_policy_uses_both_config_lifetimes(
 async fn parent_fallback_preserves_explicit_empty_and_bundled_defaults() {
     let (_, turn) = make_session_and_context().await;
     let mut config = turn.config.as_ref().clone();
-    config.guardian_policy_config = None;
+    config.guardian_policy = GuardianPolicyConfig::default();
     let (admitted, mut destination) = safety_models();
     let check = |destination: &ModelInfo| {
         check_legacy_model_safety(&admitted, &admitted, destination, &config, &config)

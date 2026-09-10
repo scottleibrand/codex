@@ -100,6 +100,7 @@ use codex_app_server_protocol::RateLimitReachedType;
 use codex_app_server_protocol::RateLimitSnapshot;
 use codex_app_server_protocol::RequestId as AppServerRequestId;
 use codex_app_server_protocol::ReviewTarget;
+use codex_app_server_protocol::SamplingSettingsEffectiveNotification;
 use codex_app_server_protocol::ServerNotification;
 use codex_app_server_protocol::ServerRequest;
 use codex_app_server_protocol::SkillMetadata;
@@ -593,6 +594,9 @@ pub(crate) struct ChatWidget {
     model_popup_model_ids: Vec<String>,
     session_telemetry: SessionTelemetry,
     session_header: SessionHeader,
+    effective_sampling_model: Option<String>,
+    effective_sampling_reasoning_effort: Option<Option<ReasoningEffortConfig>>,
+    effective_sampling_request_id: Option<String>,
     initial_user_message: Option<UserMessage>,
     status_account_display: Option<StatusAccountDisplay>,
     pub(crate) remote_connection: Option<RemoteConnectionStatus>,

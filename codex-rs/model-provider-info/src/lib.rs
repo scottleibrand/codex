@@ -27,6 +27,8 @@ use std::path::Path;
 use std::time::Duration;
 
 const DEFAULT_STREAM_IDLE_TIMEOUT_MS: u64 = 300_000;
+const DEFAULT_STREAM_SETUP_TIMEOUT_MS: u64 = 60_000;
+const DEFAULT_BEDROCK_SAMPLING_TIMEOUT_MS: u64 = 300_000;
 const DEFAULT_STREAM_MAX_RETRIES: u64 = 5;
 const DEFAULT_REQUEST_MAX_RETRIES: u64 = 4;
 const DEFAULT_AWS_CREDENTIAL_EXPORT_TIMEOUT_MS: u64 = 30_000;
@@ -137,6 +139,12 @@ pub struct ModelProviderInfo {
     /// Idle timeout (in milliseconds) to wait for activity on a streaming response before treating
     /// the connection as lost.
     pub stream_idle_timeout_ms: Option<u64>,
+    /// Maximum time (in milliseconds) to establish a streaming response, including DNS, TCP/TLS,
+    /// and response headers.
+    pub stream_setup_timeout_ms: Option<u64>,
+    /// Maximum time (in milliseconds) to receive one sampling response after its stream is
+    /// established. Tool execution and approval waits are excluded.
+    pub sampling_timeout_ms: Option<u64>,
     /// Maximum time (in milliseconds) to wait for a websocket connection attempt before treating
     /// it as failed.
     pub websocket_connect_timeout_ms: Option<u64>,
@@ -433,6 +441,23 @@ impl ModelProviderInfo {
             .unwrap_or(Duration::from_millis(DEFAULT_STREAM_IDLE_TIMEOUT_MS))
     }
 
+    /// Effective timeout for establishing a streaming response.
+    pub fn stream_setup_timeout(&self) -> Duration {
+        self.stream_setup_timeout_ms
+            .map(Duration::from_millis)
+            .unwrap_or(Duration::from_millis(DEFAULT_STREAM_SETUP_TIMEOUT_MS))
+    }
+
+    /// Effective deadline for one sampling response.
+    pub fn sampling_timeout(&self) -> Option<Duration> {
+        self.sampling_timeout_ms
+            .map(Duration::from_millis)
+            .or_else(|| {
+                self.is_amazon_bedrock()
+                    .then(|| Duration::from_millis(DEFAULT_BEDROCK_SAMPLING_TIMEOUT_MS))
+            })
+    }
+
     /// Effective timeout for websocket connect attempts.
     pub fn websocket_connect_timeout(&self) -> Duration {
         self.websocket_connect_timeout_ms
@@ -471,6 +496,8 @@ impl ModelProviderInfo {
             request_max_retries: None,
             stream_max_retries: None,
             stream_idle_timeout_ms: None,
+            stream_setup_timeout_ms: None,
+            sampling_timeout_ms: None,
             websocket_connect_timeout_ms: None,
             requires_openai_auth: true,
             supports_websockets: true,
@@ -507,6 +534,8 @@ impl ModelProviderInfo {
             request_max_retries: None,
             stream_max_retries: None,
             stream_idle_timeout_ms: None,
+            stream_setup_timeout_ms: None,
+            sampling_timeout_ms: None,
             websocket_connect_timeout_ms: None,
             requires_openai_auth: false,
             supports_websockets: false,
@@ -684,6 +713,8 @@ pub fn create_oss_provider_with_base_url(base_url: &str, wire_api: WireApi) -> M
         request_max_retries: None,
         stream_max_retries: None,
         stream_idle_timeout_ms: None,
+        stream_setup_timeout_ms: None,
+        sampling_timeout_ms: None,
         websocket_connect_timeout_ms: None,
         requires_openai_auth: false,
         supports_websockets: false,

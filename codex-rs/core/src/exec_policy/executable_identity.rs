@@ -18,12 +18,17 @@ impl ExecPolicyManager {
         configured_shell: &Shell,
         shell_mode: &UnifiedExecShellMode,
         command_platform: DangerousCommandPlatform,
+        cwd: Option<&Path>,
     ) -> ExecApprovalRequirement {
         let command = request.command;
         let executable = shell_approval_command(command, configured_shell, shell_mode);
         if executable.len() == command.len() {
             return self
-                .create_exec_approval_requirement_for_command_platform(request, command_platform)
+                .create_exec_approval_requirement_for_parsed_commands(
+                    request,
+                    commands_for_exec_policy_for_platform(command, command_platform, cwd),
+                    command_platform,
+                )
                 .await;
         }
 
@@ -34,10 +39,10 @@ impl ExecPolicyManager {
                         .unwrap_or_else(|| vec![command.to_vec()]),
                     command_origin: ExecPolicyCommandOrigin::PowerShell,
                 },
-                None => commands_for_exec_policy_for_platform(command, command_platform),
+                None => commands_for_exec_policy_for_platform(command, command_platform, cwd),
             }
         } else {
-            commands_for_exec_policy_for_platform(command, command_platform)
+            commands_for_exec_policy_for_platform(command, command_platform, cwd)
         };
 
         // Evaluate the executable alongside its apparent commands. Inner

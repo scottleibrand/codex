@@ -14,6 +14,7 @@ use codex_analytics::GuardianV2Event;
 use codex_analytics::GuardianV2EventKind;
 use codex_core::ThreadManager;
 use codex_core::config::Config;
+use codex_core::config::is_trusted_reviewer_provider;
 use codex_core::context::GuardianContextMode;
 use codex_core::context::GuardianReviewEvidence;
 use codex_core::context::NodeReplReviewEvidence;
@@ -101,6 +102,15 @@ impl ThreadLifecycleContributor<Config> for GuardianV2Extension {
     ) -> ExtensionFuture<'a, ()> {
         Box::pin(async move {
             if !input.config.features.enabled(Feature::GuardianApproval) {
+                return;
+            }
+
+            if !is_trusted_reviewer_provider(
+                &input.config.model_provider_id,
+                &input.config.model_provider,
+            ) {
+                input.thread_store.remove::<GuardianV2Enabled>();
+                input.thread_store.remove::<LunaSampler>();
                 return;
             }
 
@@ -591,7 +601,7 @@ impl GuardianV2Extension {
             let mut classification_risk = None;
             let mut classification_finished_at = None;
             let result: Result<ClassificationOutcome, String> = async {
-                let review_model_messages = if config.guardian_policy_config.is_none() {
+                let review_model_messages = if !config.guardian_policy.has_managed_override() {
                     let review_model_id = review_model_override.as_deref().unwrap_or_else(|| {
                         create_model_provider(
                             config.model_provider.clone(),
@@ -615,7 +625,7 @@ impl GuardianV2Extension {
                     None
                 };
                 let policy = config.resolve_guardian_policy(review_model_messages.as_ref());
-                let instructions = guardian_config.render_classifier_instructions(policy);
+                let instructions = guardian_config.render_classifier_instructions(policy.as_str());
                 let output = match sampler
                     .sample(LunaSamplingRequest {
                         parent_response_id,

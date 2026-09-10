@@ -402,6 +402,25 @@ async fn exec_command_pre_tool_use_payload_uses_raw_command() {
 }
 
 #[tokio::test]
+async fn exec_command_pre_tool_use_payload_preserves_native_approval_metadata() {
+    let args: ExecCommandArgs = serde_json::from_value(serde_json::json!({
+        "cmd": "printf protected",
+        "sandbox_permissions": "require_escalated",
+        "justification": "[NEEDS_APPROVAL] Update the protected hook."
+    }))
+    .expect("valid exec command arguments");
+
+    assert_eq!(
+        exec_command::exec_command_pre_tool_use_input(args),
+        serde_json::json!({
+            "command": "printf protected",
+            "sandbox_permissions": "require_escalated",
+            "justification": "[NEEDS_APPROVAL] Update the protected hook."
+        })
+    );
+}
+
+#[tokio::test]
 async fn exec_command_pre_tool_use_payload_skips_write_stdin() {
     let payload = ToolPayload::Function {
         arguments: serde_json::json!({ "chars": "echo hi" }).to_string(),

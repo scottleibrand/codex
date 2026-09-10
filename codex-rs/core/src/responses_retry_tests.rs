@@ -1,9 +1,45 @@
 use super::ResponsesStreamRequest;
+use super::is_unbounded_interactive_retry_error;
 use super::log_retry;
+use super::unbounded_retry_status;
 use crate::session::tests::make_session_and_context;
 use codex_protocol::error::CodexErr;
 use std::time::Duration;
 use tracing_test::internal::MockWriter;
+
+#[test]
+fn response_setup_timeout_uses_unbounded_interactive_retries_on_bedrock() {
+    let err = CodexErr::ResponseStreamSetupTimeout(Duration::from_secs(60));
+
+    assert!(is_unbounded_interactive_retry_error(&err, true));
+    assert!(is_unbounded_interactive_retry_error(&err, false));
+    assert!(err.is_retryable());
+    assert_eq!(
+        err.to_string(),
+        "stream disconnected before completion: timeout establishing response stream after 60s"
+    );
+}
+
+#[test]
+fn high_demand_uses_unbounded_interactive_retries_on_bedrock() {
+    let err = CodexErr::InternalServerError;
+
+    assert!(is_unbounded_interactive_retry_error(&err, true));
+    assert!(is_unbounded_interactive_retry_error(&err, false));
+    assert!(err.is_retryable());
+    assert_eq!(
+        err.to_string(),
+        "We’re currently experiencing high demand, which may cause temporary errors."
+    );
+}
+
+#[test]
+fn unbounded_retry_status_includes_retry_counter_and_delay() {
+    assert_eq!(
+        unbounded_retry_status(3, Duration::from_secs(20)),
+        "Reconnecting... retry 3 (waiting 20s)"
+    );
+}
 
 #[tokio::test]
 async fn sampling_retry_logs_stream_error_context() {

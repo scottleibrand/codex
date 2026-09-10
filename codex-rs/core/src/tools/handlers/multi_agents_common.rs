@@ -289,6 +289,8 @@ pub(crate) async fn apply_requested_spawn_agent_model_overrides(
             requested_model,
             turn.multi_agent_version,
         )?;
+        let selected_model_name =
+            canonicalize_bedrock_spawn_model_id(&config.model_provider_id, &selected_model_name);
         let selected_model_info = session
             .services
             .models_manager
@@ -390,6 +392,24 @@ pub(crate) async fn apply_spawn_agent_role(
         &model_info.supported_reasoning_levels,
         &reasoning_effort,
     )
+}
+
+pub(crate) fn canonicalize_bedrock_spawn_model_id(
+    model_provider_id: &str,
+    selected_model_name: &str,
+) -> String {
+    let Some(model_suffix) = selected_model_name.strip_prefix("gpt-") else {
+        return selected_model_name.to_string();
+    };
+    match model_provider_id {
+        codex_model_provider_info::AMAZON_BEDROCK_PROVIDER_ID => {
+            format!("openai.gpt-{model_suffix}")
+        }
+        codex_model_provider_info::AMAZON_BEDROCK_RUNTIME_PROVIDER_ID => {
+            format!("global.openai.gpt-{model_suffix}")
+        }
+        _ => selected_model_name.to_string(),
+    }
 }
 
 fn find_spawn_agent_model_name(

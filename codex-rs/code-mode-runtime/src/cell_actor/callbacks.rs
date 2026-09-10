@@ -1,5 +1,6 @@
 use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
+use std::time::Instant;
 
 use futures::FutureExt;
 use tokio::task::JoinSet;
@@ -10,8 +11,9 @@ use super::CellHost;
 use super::CellToolCall;
 use crate::TaskFailureHandler;
 use crate::runtime::RuntimeCommand;
+use crate::session_runtime::CellId;
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 pub(super) enum CallbackCompletion {
     DrainNotifications,
     Cancel,
@@ -42,6 +44,7 @@ pub(super) fn spawn_notification<H: CellHost>(
 }
 
 pub(super) fn spawn_tool<H: CellHost>(
+    cell_id: CellId,
     tasks: &mut JoinSet<()>,
     host: Arc<H>,
     invocation: CellToolCall,
@@ -50,6 +53,7 @@ pub(super) fn spawn_tool<H: CellHost>(
     task_failure_handler: Option<TaskFailureHandler>,
 ) {
     tasks.spawn(async move {
+        let runtime_tool_call_id = invocation.id.clone();
         let id = invocation.id.clone();
         let callback =
             AssertUnwindSafe(async move { host.invoke_tool(invocation, cancellation_token).await })
@@ -69,7 +73,20 @@ pub(super) fn spawn_tool<H: CellHost>(
                 )
             }
         };
-        let _ = runtime_tx.send(command);
+        let command_kind = match &command {
+            RuntimeCommand::ToolResponse { .. } => "tool_response",
+            RuntimeCommand::ToolError { .. } => "tool_error",
+            _ => "unexpected",
+        };
+        let send_succeeded = runtime_tx.send(command).is_ok();
+        tracing::info!(
+            target: "codex_code_mode_runtime::lifecycle",
+            cell_id = %cell_id,
+            runtime_tool_call_id = %runtime_tool_call_id,
+            command_kind,
+            send_succeeded,
+            "code_mode_runtime_command_sent"
+        );
         if let Some(failure_reason) = failure_reason {
             report_task_failure(task_failure_handler.as_ref(), failure_reason);
         }
@@ -77,18 +94,41 @@ pub(super) fn spawn_tool<H: CellHost>(
 }
 
 pub(super) async fn finish_callbacks(
+    cell_id: &CellId,
     cancellation_token: &CancellationToken,
     notification_tasks: &mut JoinSet<()>,
     tool_tasks: &mut JoinSet<()>,
     completion: CallbackCompletion,
     task_failure_handler: Option<&TaskFailureHandler>,
 ) {
+    let started_at = Instant::now();
+    let notification_task_count = notification_tasks.len();
+    let tool_task_count = tool_tasks.len();
+    tracing::info!(
+        target: "codex_code_mode_runtime::lifecycle",
+        cell_id = %cell_id,
+        ?completion,
+        notification_task_count,
+        tool_task_count,
+        cancellation_requested = cancellation_token.is_cancelled(),
+        "code_mode_callback_drain_started"
+    );
     if matches!(completion, CallbackCompletion::Cancel) {
         cancellation_token.cancel();
     }
     drain_tasks(notification_tasks, "notification", task_failure_handler).await;
     cancellation_token.cancel();
     drain_tasks(tool_tasks, "tool", task_failure_handler).await;
+    tracing::info!(
+        target: "codex_code_mode_runtime::lifecycle",
+        cell_id = %cell_id,
+        ?completion,
+        notification_task_count,
+        tool_task_count,
+        elapsed_ms = u64::try_from(started_at.elapsed().as_millis()).unwrap_or(u64::MAX),
+        cancellation_requested = cancellation_token.is_cancelled(),
+        "code_mode_callback_drain_finished"
+    );
 }
 
 pub(super) fn report_task_result(
