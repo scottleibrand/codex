@@ -7,6 +7,7 @@ mod input;
 mod render;
 
 use super::agents_overview::AGENTS_OVERVIEW_VIEW_ID;
+use crate::app_event::AgentsOverviewAction;
 use crate::app_event::AppEvent;
 use crate::app_event_sender::AppEventSender;
 use crate::bottom_pane::BottomPaneView;
@@ -686,6 +687,29 @@ impl BottomPaneView for AgentsOverviewView {
                     state.searching = false;
                     state.renaming = true;
                 }
+            }
+            return;
+        }
+        for (bindings, action) in [
+            (&self.agents_keymap.archive, AgentsOverviewAction::Archive),
+            (&self.agents_keymap.delete, AgentsOverviewAction::Delete),
+        ] {
+            if bindings.is_pressed(key) {
+                if let Some(row) = self.selected_row() {
+                    self.app_event_tx
+                        .send(AppEvent::ConfirmAgentsOverviewAction {
+                            thread_id: row.thread_id,
+                            action,
+                        });
+                }
+                return;
+            }
+        }
+        if self.agents_keymap.hide.is_pressed(key) {
+            if let Some(row) = self.selected_row() {
+                self.app_event_tx.send(AppEvent::HideAgentsOverviewThread {
+                    thread_id: row.thread_id,
+                });
             }
             return;
         }

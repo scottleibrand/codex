@@ -28,6 +28,7 @@ use crate::mentions::collect_explicit_app_ids;
 use crate::mentions::collect_explicit_plugin_mentions;
 use crate::mentions::collect_tool_mentions_from_messages;
 use crate::plugins::build_plugin_injections;
+use crate::responses_metadata::AutoCompactionMetadata;
 use crate::responses_metadata::CodexResponsesMetadata;
 use crate::responses_metadata::CodexResponsesRequestKind;
 use crate::responses_retry::ResponsesStreamRequest;
@@ -104,7 +105,9 @@ use codex_protocol::protocol::PlanDeltaEvent;
 use codex_protocol::protocol::ReasoningContentDeltaEvent;
 use codex_protocol::protocol::ReasoningRawContentDeltaEvent;
 use codex_protocol::protocol::SafetyBufferingEvent;
+use codex_protocol::protocol::SamplingSettingsEffectiveEvent;
 use codex_protocol::protocol::SessionSource;
+use codex_protocol::protocol::ThreadSource;
 use codex_protocol::protocol::TurnDiffEvent;
 use codex_protocol::protocol::WarningEvent;
 use codex_protocol::user_input::UserInput;
@@ -136,8 +139,13 @@ use tracing::instrument;
 use tracing::trace;
 use tracing::trace_span;
 use tracing::warn;
+use uuid::Uuid;
 
 const POST_SAMPLING_TOKEN_ESTIMATE_TARGET: &str = "codex_core::post_sampling_token_estimate";
+
+fn should_emit_sampling_settings_effective(thread_source: Option<&ThreadSource>) -> bool {
+    matches!(thread_source, None | Some(ThreadSource::User))
+}
 
 /// Explicit MCP startup requirements retained across restarts within one user turn.
 #[derive(Default)]
@@ -1400,8 +1408,7 @@ async fn run_auto_compact(
                 fallback_step_context,
                 client_session,
                 initial_context_injection,
-                reason,
-                phase,
+                AutoCompactionMetadata::new(reason, phase, /*post_compaction_input_tokens*/ 0),
             )
             .await?;
         }
@@ -1533,6 +1540,8 @@ async fn run_sampling_request(
     let mut initial_input = Some(input);
     let mut original_input = None;
     let mut executed_tool_calls_by_output = HashMap::new();
+    let sampling_request_id = Uuid::new_v4().to_string();
+    let mut sampling_attempt = 0_u64;
     loop {
         // A retry must not attribute the next tool call to the previous response.
         turn_context
@@ -1573,6 +1582,8 @@ async fn run_sampling_request(
             Arc::clone(&turn_diff_tracker),
             &prompt,
             cancellation_token.child_token(),
+            &sampling_request_id,
+            sampling_attempt,
         )
         .await
         {
@@ -1600,10 +1611,20 @@ async fn run_sampling_request(
         }
 
         if !err.is_retryable() {
+            warn!(
+                thread_id = %sess.thread_id,
+                turn_id = %turn_context.sub_id,
+                session_source = ?turn_context.session_source,
+                sampling_attempt,
+                max_retries,
+                error_info = ?err.to_codex_protocol_error(),
+                error = %err,
+                "sampling request failed outside the response retry policy"
+            );
             return Err(err);
         }
 
-        handle_retryable_response_stream_error(
+        if let Err(err) = handle_retryable_response_stream_error(
             &mut retry_state,
             max_retries,
             err,
@@ -1612,7 +1633,21 @@ async fn run_sampling_request(
             &turn_context,
             ResponsesStreamRequest::Sampling,
         )
-        .await?;
+        .await
+        {
+            warn!(
+                thread_id = %sess.thread_id,
+                turn_id = %turn_context.sub_id,
+                session_source = ?turn_context.session_source,
+                sampling_attempt,
+                max_retries,
+                error_info = ?err.to_codex_protocol_error(),
+                error = %err,
+                "sampling response retry policy returned a terminal error"
+            );
+            return Err(err);
+        }
+        sampling_attempt = sampling_attempt.saturating_add(1);
         turn_context.turn_timing_state.record_sampling_retry();
     }
 }
@@ -1972,6 +2007,7 @@ pub(super) fn realtime_text_for_event(msg: &EventMsg) -> Option<(String, Option<
         | EventMsg::RealtimeConversationRealtime(_)
         | EventMsg::RealtimeConversationClosed(_)
         | EventMsg::ModelReroute(_)
+        | EventMsg::SamplingSettingsEffective(_)
         | EventMsg::ModelVerification(_)
         | EventMsg::TurnModerationMetadata(_)
         | EventMsg::SafetyBuffering(_)
@@ -2385,6 +2421,8 @@ async fn try_run_sampling_request(
     turn_diff_tracker: SharedTurnDiffTracker,
     prompt: &Prompt,
     cancellation_token: CancellationToken,
+    sampling_request_id: &str,
+    sampling_attempt: u64,
 ) -> CodexResult<SamplingRequestResult> {
     let turn_context = Arc::clone(&step_context.turn);
     feedback_tags!(
@@ -2406,7 +2444,25 @@ async fn try_run_sampling_request(
         .features
         .enabled(Feature::ConcurrentReasoningSummaries)
         && turn_context.provider.info().is_openai();
-    let mut stream = client_session
+    if should_emit_sampling_settings_effective(responses_metadata.thread_source.as_ref()) {
+        sess.send_event(
+            &turn_context,
+            EventMsg::SamplingSettingsEffective(SamplingSettingsEffectiveEvent {
+                thread_id: sess.thread_id(),
+                root_turn_id: responses_metadata
+                    .root_turn_id
+                    .clone()
+                    .unwrap_or_else(|| turn_context.sub_id.clone()),
+                sampling_request_id: sampling_request_id.to_string(),
+                model_provider_id: turn_context.config.model_provider_id.clone(),
+                model: step_context.settings.model_info.slug.clone(),
+                reasoning_effort: step_context.settings.reasoning_effort().cloned(),
+                attempt: sampling_attempt,
+            }),
+        )
+        .await;
+    }
+    let stream_setup = client_session
         .stream(
             prompt,
             &step_context.settings.model_info,
@@ -2422,8 +2478,23 @@ async fn try_run_sampling_request(
             &inference_trace,
         )
         .instrument(trace_span!("stream_request"))
-        .or_cancel(&cancellation_token)
-        .await??;
+        .or_cancel(&cancellation_token);
+    let stream_setup_timeout = turn_context.provider.info().stream_setup_timeout();
+    let stream_result = match tokio::time::timeout(stream_setup_timeout, stream_setup).await {
+        Ok(result) => result,
+        Err(_) => {
+            return Err(CodexErr::ResponseStreamSetupTimeout(stream_setup_timeout));
+        }
+    };
+    let mut stream = match stream_result {
+        Ok(stream) => stream?,
+        Err(codex_async_utils::CancelErr::Cancelled) => {
+            return Err(CodexErr::TurnAborted);
+        }
+    };
+    let sampling_timeout = turn_context.provider.info().sampling_timeout();
+    let sampling_deadline =
+        sampling_timeout.map(|timeout| (tokio::time::Instant::now() + timeout, timeout));
     let mut in_flight: FuturesOrdered<InFlightFuture<'static>> = FuturesOrdered::new();
     let mut needs_follow_up = false;
     let mut last_agent_message: Option<String> = None;
@@ -2469,26 +2540,51 @@ async fn try_run_sampling_request(
             codex.usage.total_tokens = field::Empty,
         );
 
-        let event = match stream
-            .next()
-            .instrument(trace_span!(parent: &handle_responses, "receiving"))
-            .or_cancel(&cancellation_token)
+        let receive_event = async {
+            let stream_idle_timeout = turn_context.config.model_provider.stream_idle_timeout();
+            let event = match tokio::time::timeout(
+                stream_idle_timeout,
+                stream
+                    .next()
+                    .instrument(trace_span!(parent: &handle_responses, "receiving"))
+                    .or_cancel(&cancellation_token),
+            )
             .await
-        {
-            Ok(event) => event,
-            Err(codex_async_utils::CancelErr::Cancelled) => {
-                break Err(CodexErr::TurnAborted);
+            {
+                Ok(Ok(event)) => event,
+                Ok(Err(codex_async_utils::CancelErr::Cancelled)) => {
+                    return Err(CodexErr::TurnAborted);
+                }
+                Err(_) => {
+                    return Err(CodexErr::Stream(format!(
+                        "idle timeout waiting for response event after {stream_idle_timeout:?}"
+                    )));
+                }
+            };
+
+            match event {
+                Some(Ok(event)) => Ok(event),
+                Some(Err(err)) => Err(err),
+                None => Err(CodexErr::Stream(
+                    "stream closed before response.completed".into(),
+                )),
             }
         };
 
-        let event = match event {
-            Some(Ok(event)) => event,
-            Some(Err(err)) => break Err(err),
-            None => {
-                break Err(CodexErr::Stream(
-                    "stream closed before response.completed".into(),
-                ));
+        let event = match sampling_deadline {
+            Some((deadline, timeout)) => {
+                match tokio::time::timeout_at(deadline, receive_event).await {
+                    Ok(result) => result,
+                    Err(_) => Err(CodexErr::Stream(format!(
+                        "sampling deadline exceeded after {timeout:?}"
+                    ))),
+                }
             }
+            None => receive_event.await,
+        };
+        let event = match event {
+            Ok(event) => event,
+            Err(err) => break Err(err),
         };
 
         sess.services

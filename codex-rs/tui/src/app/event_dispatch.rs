@@ -2352,7 +2352,10 @@ impl App {
                             .map(std::string::ToString::to_string)
                             .unwrap_or_else(|| "default".to_string());
                         tracing::info!("Selected model: {model}, Selected effort: {effort_label}");
-                        let mut message = format!("Model changed to {model}");
+                        let mut message = format!(
+                            "{} {model}",
+                            self.chat_widget.model_change_message_prefix()
+                        );
                         if let Some(label) = Self::reasoning_label_for(&model, effort.as_ref()) {
                             message.push(' ');
                             message.push_str(&label);
@@ -2802,6 +2805,16 @@ impl App {
                         );
                     }
                 }
+            }
+            AppEvent::HideAgentsOverviewThread { thread_id } => {
+                self.agents_overview.hidden_threads.insert(thread_id);
+                self.repaint_agents_overview();
+            }
+            AppEvent::ConfirmAgentsOverviewAction { thread_id, action } => {
+                self.confirm_agents_overview_action(thread_id, action);
+            }
+            AppEvent::RunAgentsOverviewAction { thread_id, action } => {
+                self.run_agents_overview_action(tui, app_server, thread_id, action).await?;
             }
             AppEvent::StopAgentsOverviewThread { thread_id } => {
                 self.stop_agents_overview_thread(app_server, thread_id)

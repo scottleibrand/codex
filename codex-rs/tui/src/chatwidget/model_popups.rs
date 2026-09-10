@@ -10,6 +10,14 @@ const ULTRA_REASONING_CONCURRENCY_WARNING_THRESHOLD: usize = 8;
 pub(super) const MODEL_SELECTION_VIEW_ID: &str = "model-selection";
 pub(super) const ALL_MODELS_SELECTION_VIEW_ID: &str = "all-models-selection";
 
+fn model_picker_label(model: &str, display_name: &str) -> String {
+    if model.contains('/') && !display_name.trim().is_empty() {
+        display_name.to_string()
+    } else {
+        model.to_string()
+    }
+}
+
 impl ChatWidget {
     /// Open a popup to choose a quick auto model. Selecting "All models"
     /// opens the full picker with every available preset.
@@ -92,7 +100,7 @@ impl ChatWidget {
         let current_label = presets
             .iter()
             .find(|preset| preset.model.as_str() == current_model)
-            .map(|preset| preset.model.to_string())
+            .map(|preset| model_picker_label(&preset.model, &preset.display_name))
             .unwrap_or_else(|| self.model_display_name().to_string());
 
         let (mut auto_presets, other_presets): (Vec<ModelPreset>, Vec<ModelPreset>) = presets
@@ -137,7 +145,7 @@ impl ChatWidget {
                     )
                 };
                 SelectionItem {
-                    name: model.clone(),
+                    name: model_picker_label(&model, &preset.display_name),
                     description,
                     is_current: model.as_str() == current_model,
                     is_default: preset.is_default,
@@ -241,7 +249,7 @@ impl ChatWidget {
                 });
             })];
             items.push(SelectionItem {
-                name: preset.model.clone(),
+                name: model_picker_label(&preset.model, &preset.display_name),
                 description,
                 is_current,
                 is_default: preset.is_default,
@@ -503,7 +511,7 @@ impl ChatWidget {
         let model_label = if model_slug == LUNA_RESERVE_MODEL {
             preset.display_name.clone()
         } else {
-            model_slug.clone()
+            model_picker_label(&model_slug, &preset.display_name)
         };
         let is_current_model = self.current_model() == preset.model.as_str();
         let highlight_choice = if is_current_model {
@@ -737,5 +745,26 @@ impl ChatWidget {
         {
             action(&self.app_event_tx);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::model_picker_label;
+
+    #[test]
+    fn namespaced_models_use_the_catalog_display_name() {
+        assert_eq!(
+            model_picker_label("accounts/fireworks/models/glm-5p3", "GLM-5.3"),
+            "GLM-5.3"
+        );
+    }
+
+    #[test]
+    fn ordinary_models_keep_their_request_slug() {
+        assert_eq!(
+            model_picker_label("gpt-5.6-sol", "GPT-5.6-Sol"),
+            "gpt-5.6-sol"
+        );
     }
 }

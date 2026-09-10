@@ -328,6 +328,7 @@ async fn request_permissions_uses_issuing_step_policy_and_reviewer() {
             config.permissions.approval_policy = Constrained::allow_any(AskForApproval::Never);
             config.approvals_reviewer = ApprovalsReviewer::User;
             config.model_provider.base_url = Some(format!("{}/v1", server.uri()));
+            config.model_provider.supports_websockets = false;
             config
                 .features
                 .enable(Feature::GuardianApproval)
@@ -597,7 +598,7 @@ async fn guardian_allows_exec_command_additional_permissions_requests_past_polic
 }
 
 #[tokio::test]
-async fn strict_auto_review_turn_grant_forces_guardian_for_exec_command_policy_skip() {
+async fn strict_auto_review_turn_grant_honors_exec_command_policy_skip() {
     let server = start_mock_server().await;
     let guardian_request_log = mount_sse_once(
         &server,
@@ -714,8 +715,10 @@ async fn strict_auto_review_turn_grant_forces_guardian_for_exec_command_policy_s
 
     let output = expect_text_output(&resp.expect("expected Ok result"));
     assert!(output.contains("hi"));
-    let guardian_request = guardian_request_log.single_request();
-    assert!(guardian_request.body_contains_text("echo hi"));
+    assert!(
+        guardian_request_log.requests().is_empty(),
+        "a config-approved execpolicy skip must not invoke Guardian"
+    );
 }
 
 #[test_case(AskForApproval::Never; "policy_precheck")]

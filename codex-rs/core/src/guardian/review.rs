@@ -36,6 +36,7 @@ use std::time::Duration;
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
+use crate::config::resolve_guardian_reviewer;
 use crate::context::GuardianNodeReplPolicy;
 use crate::context::GuardianReviewEvidence;
 use crate::session::session::Session;
@@ -266,37 +267,17 @@ pub(super) async fn guardian_review_session_config(
         Some(network_proxy) => Some(network_proxy.proxy().current_cfg().await?),
         None => None,
     };
-    let available_models = session
-        .services
-        .models_manager
-        .list_models(
-            codex_models_manager::manager::RefreshStrategy::Offline,
-            turn.config.http_client_factory(),
-        )
-        .await;
-    let default_review_model_id = turn.provider.approval_review_preferred_model();
-    let codex_guardian_reviewer::ReviewModel {
-        model: guardian_model,
-        reasoning_effort: guardian_reasoning_effort,
-        default_review_model_id,
-        catalog_contains_auto_review: guardian_catalog_contains_auto_review,
-        model_overridden: guardian_review_model_overridden,
-        model_override: guardian_review_model_override,
-    } = codex_guardian_reviewer::select_review_model(
-        turn.model_info(),
-        turn.reasoning_effort(),
-        default_review_model_id,
-        &available_models,
-    );
-
-    let guardian_model_info = session
-        .services
-        .models_manager
-        .get_model_info(
-            guardian_model.as_str(),
-            &turn.config.to_models_manager_config(),
-        )
-        .await;
+    let reviewer = resolve_guardian_reviewer(
+        turn.config.as_ref(),
+        session.services.models_manager.as_ref(),
+        Some(Arc::clone(&session.services.auth_manager)),
+        turn.model_info().as_ref(),
+        turn.reasoning_effort().cloned(),
+    )
+    .await?;
+    let guardian_model = reviewer.model;
+    let guardian_reasoning_effort = reviewer.reasoning_effort;
+    let guardian_model_info = reviewer.model_info;
     let mut spawn_config = build_guardian_review_session_config(
         turn.config.as_ref(),
         live_network_config,
@@ -304,6 +285,10 @@ pub(super) async fn guardian_review_session_config(
         guardian_reasoning_effort.clone(),
         guardian_model_info.model_messages.as_ref(),
     )?;
+    spawn_config.model_provider_id = reviewer.provider_id.clone();
+    spawn_config.model_provider = reviewer.provider;
+    spawn_config.model_provider.request_max_retries = Some(1);
+    spawn_config.model_provider.stream_max_retries = Some(1);
     if turn.model_info().computer_use_review_required() {
         spawn_config
             .features
@@ -326,10 +311,10 @@ pub(super) async fn guardian_review_session_config(
         ),
         model: guardian_model,
         reasoning_effort: guardian_reasoning_effort,
-        default_review_model_id,
-        catalog_contains_auto_review: guardian_catalog_contains_auto_review,
-        model_overridden: guardian_review_model_overridden,
-        model_override: guardian_review_model_override,
+        default_review_model_id: reviewer.default_model_id,
+        catalog_contains_auto_review: reviewer.catalog_contains_default,
+        model_overridden: reviewer.model_overridden,
+        model_override: reviewer.model_override,
     })
 }
 

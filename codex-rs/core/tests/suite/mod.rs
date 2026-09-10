@@ -77,11 +77,13 @@ mod guardian_authorization;
 mod guardian_context_budget;
 mod guardian_history;
 mod guardian_mcp_elicitation;
+mod guardian_provider;
 mod guardian_retained_context;
 #[cfg(not(target_os = "windows"))]
 mod guardian_review;
 #[cfg(not(target_os = "windows"))]
 mod guardian_review_cancellation;
+mod guardian_reviewer;
 #[cfg(not(target_os = "windows"))]
 mod guardian_subagent_authorization;
 #[cfg(not(target_os = "windows"))]

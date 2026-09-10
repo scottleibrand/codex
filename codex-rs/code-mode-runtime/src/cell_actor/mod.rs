@@ -37,6 +37,7 @@ use crate::runtime::RuntimeControlCommand;
 use crate::runtime::RuntimeEvent;
 use crate::runtime::spawn_runtime;
 use crate::session_runtime::CellEvent;
+use crate::session_runtime::CellId;
 use crate::session_runtime::CreateCellRequest as CellRequest;
 use crate::session_runtime::ObserveMode;
 use crate::session_runtime::OutputItem;
@@ -46,6 +47,7 @@ pub(crate) struct CellActor;
 
 impl CellActor {
     pub(crate) fn prepare<H: CellHost>(
+        cell_id: CellId,
         request: CellRequest,
         stored_values: HashMap<String, JsonValue>,
         host: Arc<H>,
@@ -72,6 +74,7 @@ impl CellActor {
         )?;
         let handle = CellHandle::new(command_tx, Arc::clone(&cell_state));
         let task = run_cell(
+            cell_id,
             host,
             CellContext {
                 runtime_tx,
@@ -106,6 +109,7 @@ struct Observer {
 }
 
 async fn run_cell<H: CellHost>(
+    cell_id: CellId,
     host: Arc<H>,
     context: CellContext,
     mut event_rx: mpsc::UnboundedReceiver<RuntimeEvent>,
@@ -151,6 +155,7 @@ async fn run_cell<H: CellHost>(
                 );
                 if runtime_closed {
                     finish_callbacks(
+                        &cell_id,
                         &callback_cancellation_token,
                         &mut notification_tasks,
                         &mut tool_tasks,
@@ -262,6 +267,7 @@ async fn run_cell<H: CellHost>(
                     runtime_closed = true;
                     if termination || cancellation_token.is_cancelled() {
                         finish_callbacks(
+                            &cell_id,
                             &callback_cancellation_token,
                             &mut notification_tasks,
                             &mut tool_tasks,
@@ -286,6 +292,7 @@ async fn run_cell<H: CellHost>(
                         );
                     }
                     finish_callbacks(
+                        &cell_id,
                         &callback_cancellation_token,
                         &mut notification_tasks,
                         &mut tool_tasks,
@@ -399,6 +406,7 @@ async fn run_cell<H: CellHost>(
                     RuntimeEvent::ToolCall { id, name, kind, input } => {
                         pending_tool_call_ids.push(id.clone());
                         spawn_tool(
+                            cell_id.clone(),
                             &mut tool_tasks,
                             Arc::clone(&host),
                             CellToolCall {
@@ -420,6 +428,7 @@ async fn run_cell<H: CellHost>(
                         yield_timer = None;
                         if termination || cancellation_token.is_cancelled() {
                             finish_callbacks(
+                                &cell_id,
                                 &callback_cancellation_token,
                                 &mut notification_tasks,
                                 &mut tool_tasks,
@@ -436,6 +445,7 @@ async fn run_cell<H: CellHost>(
                             break;
                         }
                         finish_callbacks(
+                            &cell_id,
                             &callback_cancellation_token,
                             &mut notification_tasks,
                             &mut tool_tasks,
@@ -503,6 +513,7 @@ async fn run_cell<H: CellHost>(
         &cancellation_token,
     );
     finish_callbacks(
+        &cell_id,
         &callback_cancellation_token,
         &mut notification_tasks,
         &mut tool_tasks,

@@ -5608,6 +5608,26 @@
           "properties": {
             "method": {
               "enum": [
+                "turn/samplingSettingsEffective"
+              ],
+              "title": "Turn/samplingSettingsEffectiveNotificationMethod",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/definitions/v2/SamplingSettingsEffectiveNotification"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "title": "Turn/samplingSettingsEffectiveNotification",
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "enum": [
                 "model/verification"
               ],
               "title": "Model/verificationNotificationMethod",
@@ -19179,6 +19199,51 @@
             "type": "object"
           }
         ]
+      },
+      "SamplingSettingsEffectiveNotification": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "properties": {
+          "attempt": {
+            "format": "uint64",
+            "minimum": 0.0,
+            "type": "integer"
+          },
+          "model": {
+            "type": "string"
+          },
+          "modelProviderId": {
+            "type": "string"
+          },
+          "reasoningEffort": {
+            "anyOf": [
+              {
+                "$ref": "#/definitions/v2/ReasoningEffort"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "rootTurnId": {
+            "type": "string"
+          },
+          "samplingRequestId": {
+            "type": "string"
+          },
+          "threadId": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "attempt",
+          "model",
+          "modelProviderId",
+          "rootTurnId",
+          "samplingRequestId",
+          "threadId"
+        ],
+        "title": "SamplingSettingsEffectiveNotification",
+        "type": "object"
       },
       "SandboxMode": {
         "enum": [

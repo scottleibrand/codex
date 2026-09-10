@@ -548,6 +548,15 @@ pub enum ThreadStoreToml {
 pub struct AutoReviewToml {
     /// Additional policy instructions inserted into the guardian prompt.
     pub policy: Option<String>,
+
+    /// Reserved provider ID used for Guardian review.
+    pub model_provider: Option<String>,
+
+    /// Model used for Guardian review.
+    pub model: Option<String>,
+
+    /// Reasoning effort used for Guardian review.
+    pub reasoning_effort: Option<ReasoningEffort>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema)]

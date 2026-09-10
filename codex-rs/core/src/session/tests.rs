@@ -2771,6 +2771,31 @@ fn resolve_multi_agent_version_handles_unset_and_legacy_history() {
     );
 }
 
+#[test]
+fn bedrock_downgrades_multi_agent_v2_sessions_to_v1() {
+    for provider_id in [
+        codex_model_provider_info::AMAZON_BEDROCK_PROVIDER_ID,
+        codex_model_provider_info::AMAZON_BEDROCK_RUNTIME_PROVIDER_ID,
+    ] {
+        assert_eq!(
+            compatible_multi_agent_version(provider_id, Some(MultiAgentVersion::V2)),
+            Some(MultiAgentVersion::V1)
+        );
+        assert_eq!(
+            compatible_multi_agent_version(provider_id, Some(MultiAgentVersion::Disabled)),
+            Some(MultiAgentVersion::Disabled)
+        );
+    }
+
+    assert_eq!(
+        compatible_multi_agent_version(
+            codex_model_provider_info::OPENAI_PROVIDER_ID,
+            Some(MultiAgentVersion::V2)
+        ),
+        Some(MultiAgentVersion::V2)
+    );
+}
+
 #[tokio::test]
 async fn record_initial_history_new_defers_initial_context_until_first_turn() {
     let (session, _turn_context) = make_session_and_context().await;
@@ -11393,8 +11418,11 @@ async fn remote_compaction_v2_retains_only_the_selected_step(first_attempt: Firs
         Some(Arc::clone(&fallback)),
         &mut client_session,
         InitialContextInjection::DoNotInject,
-        CompactionReason::ModelDownshift,
-        CompactionPhase::PreTurn,
+        crate::responses_metadata::AutoCompactionMetadata::new(
+            CompactionReason::ModelDownshift,
+            CompactionPhase::PreTurn,
+            /*post_compaction_input_tokens*/ 0,
+        ),
     )
     .await
     .expect("compaction succeeds");

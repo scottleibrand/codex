@@ -119,7 +119,7 @@ fn should_classify_tool(tool: &ToolName, payload: &ToolPayload, policy: Guardian
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn installed_extension_warms_connections_without_blocking_thread_start() -> Result<()> {
+async fn installed_extension_warms_only_for_trusted_providers() -> Result<()> {
     skip_if_no_network!(Ok(()));
 
     let thread_server = responses::start_mock_server().await;
@@ -179,6 +179,22 @@ async fn installed_extension_warms_connections_without_blocking_thread_start() -
         .expect("Guardian v2 should initialize")
         .wait_for_prewarm(PREWARM_TIMEOUT)
         .await?;
+
+    config.model_provider_id = "fireworks".to_string();
+    registry.thread_lifecycle_contributors()[0]
+        .on_thread_start(ThreadStartInput {
+            config: &config,
+            session_source: &SessionSource::Exec,
+            persistent_thread_state_available: false,
+            environments: &[],
+            mcp_resource_client: None,
+            extension_metrics: None,
+            session_store: &session_store,
+            thread_store,
+        })
+        .await;
+    assert!(thread_store.get::<LunaSampler>().is_none());
+    assert!(thread_store.get::<GuardianV2Enabled>().is_none());
     Ok(())
 }
 
@@ -861,7 +877,9 @@ async fn sample_configured_conversation_history_with_source(
         .with_model("gpt-5.5")
         .with_config(move |config| {
             config.approvals_reviewer = ApprovalsReviewer::AutoReview;
-            config.guardian_policy_config = guardian_policy;
+            config.guardian_policy = guardian_policy
+                .map(codex_core::config::GuardianPolicyConfig::with_managed_override)
+                .unwrap_or_default();
         })
         .with_pre_build_hook(move |home| {
             std::fs::write(home.join("config.toml"), guardian_config)

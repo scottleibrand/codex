@@ -383,9 +383,25 @@
     },
     "AutoReviewToml": {
       "properties": {
+        "model": {
+          "description": "Model used for Guardian review.",
+          "type": "string"
+        },
+        "model_provider": {
+          "description": "Reserved provider ID used for Guardian review.",
+          "type": "string"
+        },
         "policy": {
           "description": "Additional policy instructions inserted into the guardian prompt.",
           "type": "string"
+        },
+        "reasoning_effort": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/ReasoningEffort"
+            }
+          ],
+          "description": "Reasoning effort used for Guardian review."
         }
       },
       "type": "object"
@@ -631,6 +647,9 @@
           "default": null,
           "description": "Optional feature toggles scoped to this profile.",
           "properties": {
+            "api_key_model_discovery": {
+              "type": "boolean"
+            },
             "apply_patch_freeform": {
               "type": "boolean"
             },
@@ -2395,6 +2414,12 @@
           "description": "Does this provider require an OpenAI API Key or ChatGPT login token? If true, user is presented with login screen on first run, and login preference and token/key are stored in auth.json. If false (which is the default), login screen is skipped, and API key (if needed) comes from the \"env_key\" environment variable.",
           "type": "boolean"
         },
+        "sampling_timeout_ms": {
+          "description": "Maximum time (in milliseconds) to receive one sampling response after its stream is established. Tool execution and approval waits are excluded.",
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
         "stream_idle_timeout_ms": {
           "description": "Idle timeout (in milliseconds) to wait for activity on a streaming response before treating the connection as lost.",
           "format": "uint64",
@@ -2403,6 +2428,12 @@
         },
         "stream_max_retries": {
           "description": "Number of times to retry reconnecting a dropped streaming response before failing.",
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "stream_setup_timeout_ms": {
+          "description": "Maximum time (in milliseconds) to establish a streaming response, including DNS, TCP/TLS, and response headers.",
           "format": "uint64",
           "minimum": 0.0,
           "type": "integer"
@@ -3990,6 +4021,9 @@
           ],
           "default": {
             "agents": {
+              "archive": null,
+              "delete": null,
+              "hide": null,
               "new_task": null,
               "rename": null,
               "resume": null,
@@ -4300,6 +4334,30 @@
       "additionalProperties": false,
       "description": "Shortcuts specific to the shared agents overview.",
       "properties": {
+        "archive": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/KeybindingsSpec"
+            }
+          ],
+          "description": "Archive the selected task and its child agents after confirmation."
+        },
+        "delete": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/KeybindingsSpec"
+            }
+          ],
+          "description": "Permanently delete the selected task and its child agents after confirmation."
+        },
+        "hide": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/KeybindingsSpec"
+            }
+          ],
+          "description": "Hide the selected task until explicitly resumed or the TUI restarts."
+        },
         "new_task": {
           "allOf": [
             {
@@ -4805,6 +4863,9 @@
             }
           ],
           "default": {
+            "archive": null,
+            "delete": null,
+            "hide": null,
             "new_task": null,
             "rename": null,
             "resume": null,
@@ -6123,6 +6184,9 @@
       "default": null,
       "description": "Centralized feature flags (new). Prefer this over individual toggles.",
       "properties": {
+        "api_key_model_discovery": {
+          "type": "boolean"
+        },
         "apply_patch_freeform": {
           "type": "boolean"
         },

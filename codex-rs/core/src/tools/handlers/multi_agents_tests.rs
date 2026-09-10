@@ -98,6 +98,38 @@ fn invocation(
     }
 }
 
+#[test]
+fn bedrock_spawn_model_ids_use_provider_canonical_names() {
+    assert_eq!(
+        canonicalize_bedrock_spawn_model_id(
+            codex_model_provider_info::AMAZON_BEDROCK_PROVIDER_ID,
+            "gpt-5.6-luna"
+        ),
+        "openai.gpt-5.6-luna"
+    );
+    assert_eq!(
+        canonicalize_bedrock_spawn_model_id(
+            codex_model_provider_info::AMAZON_BEDROCK_RUNTIME_PROVIDER_ID,
+            "gpt-5.6-luna"
+        ),
+        "global.openai.gpt-5.6-luna"
+    );
+    assert_eq!(
+        canonicalize_bedrock_spawn_model_id(
+            codex_model_provider_info::OPENAI_PROVIDER_ID,
+            "gpt-5.6-luna"
+        ),
+        "gpt-5.6-luna"
+    );
+    assert_eq!(
+        canonicalize_bedrock_spawn_model_id(
+            codex_model_provider_info::AMAZON_BEDROCK_PROVIDER_ID,
+            "openai.gpt-5.6-luna"
+        ),
+        "openai.gpt-5.6-luna"
+    );
+}
+
 fn function_payload(args: serde_json::Value) -> ToolPayload {
     ToolPayload::Function {
         arguments: args.to_string(),
@@ -911,7 +943,7 @@ async fn multi_agent_v2_spawn_requires_task_name() {
     let Err(err) = SpawnAgentHandlerV2::default().handle(invocation).await else {
         panic!("missing task_name should be rejected");
     };
-    let FunctionCallError::RespondToModel(message) = err else {
+    let FunctionCallError::MalformedArguments(message) = err else {
         panic!("missing task_name should surface as a model-facing error");
     };
     assert!(message.contains("missing field `task_name`"));
@@ -947,7 +979,7 @@ async fn multi_agent_v2_spawn_rejects_legacy_items_field() {
     let Err(err) = SpawnAgentHandlerV2::default().handle(invocation).await else {
         panic!("legacy items field should be rejected");
     };
-    let FunctionCallError::RespondToModel(message) = err else {
+    let FunctionCallError::MalformedArguments(message) = err else {
         panic!("legacy items field should surface as a model-facing error");
     };
     assert!(message.contains("unknown field `items`"));
@@ -1701,7 +1733,7 @@ async fn multi_agent_v2_send_message_rejects_legacy_items_field() {
     let Err(err) = SendMessageHandlerV2.handle(invocation).await else {
         panic!("legacy items field should be rejected in v2");
     };
-    let FunctionCallError::RespondToModel(message) = err else {
+    let FunctionCallError::MalformedArguments(message) = err else {
         panic!("legacy items field should surface as a model-facing error");
     };
     assert!(message.contains("unknown field `items`"));
@@ -1756,7 +1788,7 @@ async fn multi_agent_v2_send_message_rejects_interrupt_parameter() {
     let Err(err) = SendMessageHandlerV2.handle(invocation).await else {
         panic!("send_message interrupt parameter should be rejected");
     };
-    let FunctionCallError::RespondToModel(message) = err else {
+    let FunctionCallError::MalformedArguments(message) = err else {
         panic!("expected model-facing parse error");
     };
     assert!(message.starts_with(
@@ -1984,7 +2016,7 @@ async fn multi_agent_v2_followup_task_rejects_legacy_items_field() {
     let Err(err) = FollowupTaskHandlerV2.handle(invocation).await else {
         panic!("legacy items field should be rejected in v2");
     };
-    let FunctionCallError::RespondToModel(message) = err else {
+    let FunctionCallError::MalformedArguments(message) = err else {
         panic!("legacy items field should surface as a model-facing error");
     };
     assert!(message.contains("unknown field `items`"));

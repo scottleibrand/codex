@@ -1672,10 +1672,8 @@ print(json.dumps({"hookSpecificOutput": {
         .thread_manager
         .fork_thread(
             ForkSnapshot::TruncateBeforeNthUserMessage(1),
-            test.config.clone(),
+            StartThreadOptions::new(test.config.clone()),
             test.codex.rollout_path().expect("parent rollout path"),
-            /*thread_source*/ None,
-            /*parent_trace*/ None,
         )
         .await?
         .thread;
@@ -3525,7 +3523,11 @@ async fn pre_tool_use_json_deny_blocks_exec_command_before_execution() -> Result
     let marker_dir = TempDir::new()?;
     let marker = marker_dir.path().join("pretooluse-exec-command-marker");
     let command = format!("git init --quiet {}", marker.display());
-    let args = serde_json::json!({ "cmd": command });
+    let args = serde_json::json!({
+        "cmd": command,
+        "sandbox_permissions": "require_escalated",
+        "justification": "Review this unsandboxed command",
+    });
     let responses = mount_sse_sequence(
         &server,
         vec![
@@ -3553,7 +3555,7 @@ async fn pre_tool_use_json_deny_blocks_exec_command_before_execution() -> Result
                 .expect("failed to write pre tool use hook test fixture");
         })
         .with_config(trust_discovered_hooks);
-    let test = builder.build(&server).await?;
+    let test = builder.build_with_auto_env(&server).await?;
 
     test.submit_turn_with_permission_profile(
         "run the blocked shell command",
@@ -3586,7 +3588,14 @@ async fn pre_tool_use_json_deny_blocks_exec_command_before_execution() -> Result
     assert_eq!(hook_inputs[0]["hook_event_name"], "PreToolUse");
     assert_eq!(hook_inputs[0]["tool_name"], "Bash");
     assert_eq!(hook_inputs[0]["tool_use_id"], call_id);
-    assert_eq!(hook_inputs[0]["tool_input"]["command"], command);
+    assert_eq!(
+        hook_inputs[0]["tool_input"],
+        serde_json::json!({
+            "command": command,
+            "sandbox_permissions": "require_escalated",
+            "justification": "Review this unsandboxed command",
+        }),
+    );
     let transcript_path = hook_inputs[0]["transcript_path"]
         .as_str()
         .expect("pre tool use hook transcript_path");
@@ -4066,7 +4075,7 @@ async fn pre_tool_use_block_rejects_code_mode_tool_promise_before_execution() ->
     let code = format!(
         r#"
 try {{
-  const result = await tools.exec_command({{ cmd: {command_json} }});
+  const result = await tools.exec_command({{ cmd: {command_json}, sandbox_permissions: "require_escalated", justification: "Review this unsandboxed command" }});
   text(JSON.stringify({{ kind: "unexpected-success", result }}));
 }} catch (error) {{
   text(JSON.stringify({{ kind: "caught", error: String(error) }}));
@@ -4101,7 +4110,7 @@ try {{
             let _ = config.features.enable(Feature::CodeMode);
             trust_discovered_hooks(config);
         });
-    let test = builder.build(&server).await?;
+    let test = builder.build_with_auto_env(&server).await?;
 
     test.submit_turn_with_permission_profile(
         "run the blocked shell command from code mode",
@@ -4113,7 +4122,10 @@ try {{
     assert_eq!(requests.len(), 2);
     let output_item = requests[1].custom_tool_call_output(call_id);
     let output = code_mode_custom_tool_output_text(&output_item);
-    assert!(output.contains(r#""kind":"caught""#));
+    assert!(
+        output.contains(r#""kind":"caught""#),
+        "unexpected code-mode output: {output}"
+    );
     assert!(output.contains(reason));
     assert!(!output.contains("unexpected-success"));
     assert!(
@@ -4123,7 +4135,14 @@ try {{
 
     let hook_inputs = read_pre_tool_use_hook_inputs(test.codex_home_path())?;
     assert_eq!(hook_inputs.len(), 1);
-    assert_eq!(hook_inputs[0]["tool_input"]["command"], command);
+    assert_eq!(
+        hook_inputs[0]["tool_input"],
+        serde_json::json!({
+            "command": command,
+            "sandbox_permissions": "require_escalated",
+            "justification": "Review this unsandboxed command",
+        }),
+    );
 
     Ok(())
 }
