@@ -1,6 +1,7 @@
 use super::ResponsesStreamRequest;
 use super::is_unbounded_interactive_retry_error;
 use super::log_retry;
+use super::setup_retry_backoff;
 use super::unbounded_retry_status;
 use crate::session::tests::make_session_and_context;
 use codex_protocol::error::CodexErr;
@@ -8,11 +9,13 @@ use std::time::Duration;
 use tracing_test::internal::MockWriter;
 
 #[test]
-fn response_setup_timeout_uses_unbounded_interactive_retries_on_bedrock() {
+fn response_setup_timeout_uses_bounded_retries() {
     let err = CodexErr::ResponseStreamSetupTimeout(Duration::from_secs(60));
 
-    assert!(is_unbounded_interactive_retry_error(&err, true));
-    assert!(is_unbounded_interactive_retry_error(&err, false));
+    assert!(!is_unbounded_interactive_retry_error(&err, true, false));
+    assert!(!is_unbounded_interactive_retry_error(&err, false, false));
+    assert!(!is_unbounded_interactive_retry_error(&err, true, true));
+    assert!(!is_unbounded_interactive_retry_error(&err, false, true));
     assert!(err.is_retryable());
     assert_eq!(
         err.to_string(),
@@ -24,8 +27,10 @@ fn response_setup_timeout_uses_unbounded_interactive_retries_on_bedrock() {
 fn high_demand_uses_unbounded_interactive_retries_on_bedrock() {
     let err = CodexErr::InternalServerError;
 
-    assert!(is_unbounded_interactive_retry_error(&err, true));
-    assert!(is_unbounded_interactive_retry_error(&err, false));
+    assert!(!is_unbounded_interactive_retry_error(&err, true, false));
+    assert!(!is_unbounded_interactive_retry_error(&err, false, false));
+    assert!(is_unbounded_interactive_retry_error(&err, true, true));
+    assert!(is_unbounded_interactive_retry_error(&err, false, true));
     assert!(err.is_retryable());
     assert_eq!(
         err.to_string(),
@@ -39,6 +44,16 @@ fn unbounded_retry_status_includes_retry_counter_and_delay() {
         unbounded_retry_status(3, Duration::from_secs(20)),
         "Reconnecting... retry 3 (waiting 20s)"
     );
+}
+
+#[test]
+fn setup_timeout_backoff_spans_multi_minute_failures() {
+    assert_eq!(setup_retry_backoff(1), Duration::from_secs(30));
+    assert_eq!(setup_retry_backoff(2), Duration::from_secs(60));
+    assert_eq!(setup_retry_backoff(3), Duration::from_secs(120));
+    assert_eq!(setup_retry_backoff(4), Duration::from_secs(240));
+    assert_eq!(setup_retry_backoff(5), Duration::from_secs(300));
+    assert_eq!(setup_retry_backoff(6), Duration::from_secs(300));
 }
 
 #[tokio::test]

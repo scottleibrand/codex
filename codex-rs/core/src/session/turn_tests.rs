@@ -60,22 +60,32 @@ fn post_sampling_token_estimate_is_disabled_by_always_on_sinks() {
 
 #[test]
 fn effective_sampling_settings_are_only_emitted_for_root_user_threads() {
-    assert!(should_emit_sampling_settings_effective(None));
-    assert!(should_emit_sampling_settings_effective(Some(
-        &ThreadSource::User
-    )));
-    assert!(!should_emit_sampling_settings_effective(Some(
-        &ThreadSource::Subagent
-    )));
-    assert!(!should_emit_sampling_settings_effective(Some(
-        &ThreadSource::GuardianReview
-    )));
-    assert!(!should_emit_sampling_settings_effective(Some(
-        &ThreadSource::Feature("test".to_string())
-    )));
-    assert!(!should_emit_sampling_settings_effective(Some(
-        &ThreadSource::MemoryConsolidation
-    )));
+    assert!(should_emit_sampling_settings_effective(None, 0));
+    assert!(should_emit_sampling_settings_effective(
+        Some(&ThreadSource::User),
+        0
+    ));
+    assert!(!should_emit_sampling_settings_effective(None, 1));
+    assert!(!should_emit_sampling_settings_effective(
+        Some(&ThreadSource::User),
+        1
+    ));
+    assert!(!should_emit_sampling_settings_effective(
+        Some(&ThreadSource::Subagent),
+        0
+    ));
+    assert!(!should_emit_sampling_settings_effective(
+        Some(&ThreadSource::GuardianReview),
+        0
+    ));
+    assert!(!should_emit_sampling_settings_effective(
+        Some(&ThreadSource::Feature("test".to_string())),
+        0
+    ));
+    assert!(!should_emit_sampling_settings_effective(
+        Some(&ThreadSource::MemoryConsolidation),
+        0
+    ));
 }
 
 #[tokio::test]

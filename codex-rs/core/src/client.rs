@@ -741,12 +741,14 @@ impl ModelClient {
         model_info: &ModelInfo,
         effort: Option<ReasoningEffortConfig>,
         summary: ReasoningSummaryConfig,
+        provider_supports_reasoning_summary_parameter: bool,
     ) -> Reasoning {
         Reasoning {
             effort: effort
                 .or_else(|| model_info.default_reasoning_level.clone())
                 .map(|effort| model_info.resolve_reasoning_effort(effort)),
             summary: (model_info.supports_reasoning_summary_parameter
+                && provider_supports_reasoning_summary_parameter
                 && summary != ReasoningSummaryConfig::None)
                 .then_some(summary),
             // When Responses Lite is disabled, omit context so Responses uses the default,
@@ -767,7 +769,11 @@ impl ModelClient {
         responses_metadata: &CodexResponsesMetadata,
     ) -> Result<ResponsesApiRequest> {
         let mut input = prompt.get_formatted_input_for_request(model_info);
-        let is_openai = self.state.provider.info().is_openai();
+        let provider_info = self.state.provider.info();
+        let is_openai = provider_info.is_openai();
+        // Bedrock's OpenAI-compatible Responses adapter currently rejects
+        // reasoning.summary, even for OpenAI models that support it upstream.
+        let provider_supports_reasoning_summary_parameter = !provider_info.is_amazon_bedrock();
         let (instructions, tools) = if model_info.use_responses_lite {
             // These prompt-only items are rebuilt on every request. Hash their visible payloads
             // within the thread so retries and resumed sessions preserve their identity.
@@ -818,7 +824,12 @@ impl ModelClient {
                 }
             }
         }
-        let reasoning = self.build_reasoning(model_info, effort, summary);
+        let reasoning = self.build_reasoning(
+            model_info,
+            effort,
+            summary,
+            provider_supports_reasoning_summary_parameter,
+        );
         let stream_options = (self.state.concurrent_reasoning_summaries_enabled
             && is_openai
             && reasoning.summary.is_some())

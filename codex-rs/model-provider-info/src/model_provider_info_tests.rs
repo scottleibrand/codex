@@ -6,6 +6,23 @@ use std::num::NonZeroU64;
 use tempfile::tempdir;
 
 #[test]
+fn bedrock_429_uses_exponential_retries() {
+    let providers = built_in_model_providers(/*openai_base_url*/ None);
+    let bedrock = providers[AMAZON_BEDROCK_PROVIDER_ID]
+        .to_api_provider(/*auth_mode*/ None)
+        .expect("Bedrock provider")
+        .retry;
+    assert_eq!(bedrock.max_attempts, DEFAULT_REQUEST_MAX_RETRIES);
+    assert_eq!(bedrock.base_delay, Duration::from_secs(2));
+    assert!(bedrock.retry_429);
+    let openai = providers[OPENAI_PROVIDER_ID]
+        .to_api_provider(/*auth_mode*/ None)
+        .expect("OpenAI provider")
+        .retry;
+    assert!(!openai.retry_429);
+}
+
+#[test]
 fn test_deserialize_ollama_model_provider_toml() {
     let azure_provider_toml = r#"
 name = "Ollama"

@@ -447,6 +447,38 @@ fn reasoning_effort_in_request(
 }
 
 #[test]
+fn bedrock_omits_reasoning_summary_parameter() -> anyhow::Result<()> {
+    let provider = ModelProviderInfo::create_amazon_bedrock_provider(/*aws*/ None);
+    let mut client = test_model_client(SessionSource::Cli);
+    Arc::get_mut(&mut client.state)
+        .expect("test client should have unique session state")
+        .provider = create_model_provider(provider, /*auth_manager*/ None);
+    let responses_metadata = test_responses_metadata_for_client(
+        &client,
+        /*turn_id*/ None,
+        format!("{}:0", client.state.thread_id),
+        /*parent_thread_id*/ None,
+        TestCodexResponsesRequestKind::Turn,
+    );
+
+    let request = client.build_responses_request(
+        &Prompt::default(),
+        &test_model_info(),
+        Some(ReasoningEffort::Medium),
+        codex_protocol::config_types::ReasoningSummary::Detailed,
+        /*service_tier*/ None,
+        &responses_metadata,
+    )?;
+    let reasoning = request
+        .reasoning
+        .expect("Bedrock request should retain reasoning effort");
+
+    assert_eq!(reasoning.effort, Some(ReasoningEffort::Medium));
+    assert_eq!(reasoning.summary, None);
+    Ok(())
+}
+
+#[test]
 fn reasoning_effort_for_requests_uses_multi_agent_override_for_ultra() {
     let mut model_info = test_model_info();
     model_info.multi_agent_reasoning_effort = Some(ReasoningEffort::High);

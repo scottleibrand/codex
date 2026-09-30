@@ -16,6 +16,8 @@ use tracing::warn;
 
 const INITIAL_CONNECTION_RETRY_DELAY: Duration = Duration::from_secs(5);
 const MAX_CONNECTION_RETRY_DELAY: Duration = Duration::from_secs(60);
+const INITIAL_SETUP_RETRY_DELAY: Duration = Duration::from_secs(30);
+const MAX_SETUP_RETRY_DELAY: Duration = Duration::from_secs(300);
 
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum ResponsesStreamRequest {
@@ -49,6 +51,7 @@ pub(crate) async fn handle_retryable_response_stream_error(
     sess: &Session,
     turn_context: &TurnContext,
     request: ResponsesStreamRequest,
+    stream_established: bool,
 ) -> Result<(), CodexErr> {
     let operation = match request {
         ResponsesStreamRequest::Sampling => RetryOperation::Sampling,
@@ -63,6 +66,7 @@ pub(crate) async fn handle_retryable_response_stream_error(
         && is_unbounded_interactive_retry_error(
             &err,
             turn_context.provider.info().is_amazon_bedrock(),
+            stream_established,
         )
         && !turn_context.session_source.is_internal()
     {
@@ -110,7 +114,10 @@ pub(crate) async fn handle_retryable_response_stream_error(
     if retry_state.retries < max_retries {
         retry_state.retries += 1;
         let retry_count = retry_state.retries;
-        let delay = err.retry_delay().unwrap_or_else(|| backoff(retry_count));
+        let delay = err.retry_delay().unwrap_or_else(|| match err.details() {
+            CodexErrorDetails::ResponseStreamSetupTimeout(_) => setup_retry_backoff(retry_count),
+            _ => backoff(retry_count),
+        });
         log_retry(request, turn_context, &err, retry_count, max_retries, delay);
 
         // In release builds, hide the first websocket retry notification to reduce noisy
@@ -121,12 +128,8 @@ pub(crate) async fn handle_retryable_response_stream_error(
         if report_error {
             // Surface retry information to any UI/front-end so the user understands what is
             // happening instead of staring at a seemingly frozen screen.
-            sess.notify_stream_error(
-                turn_context,
-                format!("Reconnecting... {retry_count}/{max_retries}"),
-                err,
-            )
-            .await;
+            let wait = format!("Reconnecting... {retry_count}/{max_retries} (waiting {delay:?})");
+            sess.notify_stream_error(turn_context, wait, err).await;
         }
         codex_client::record_retry!(retry_count, delay, operation);
         tokio::time::sleep(delay).await;
@@ -136,11 +139,29 @@ pub(crate) async fn handle_retryable_response_stream_error(
     Err(err)
 }
 
-fn is_unbounded_interactive_retry_error(err: &CodexErr, is_amazon_bedrock: bool) -> bool {
-    matches!(
+fn is_unbounded_interactive_retry_error(
+    err: &CodexErr,
+    is_amazon_bedrock: bool,
+    stream_established: bool,
+) -> bool {
+    // The unbounded interactive policy is for recovering a stream that was
+    // actually established. Setup failures, including Bedrock's 60-second
+    // response-stream establishment timeout, respect the bounded retry cap.
+    !matches!(
         err.details(),
-        CodexErrorDetails::ResponseStreamSetupTimeout(_) | CodexErrorDetails::InternalServerError
-    ) || (!is_amazon_bedrock && matches!(err.details(), CodexErrorDetails::ConnectionFailed(_)))
+        CodexErrorDetails::ResponseStreamSetupTimeout(_)
+    ) && stream_established
+        && (matches!(err.details(), CodexErrorDetails::InternalServerError)
+            || (!is_amazon_bedrock
+                && matches!(err.details(), CodexErrorDetails::ConnectionFailed(_))))
+}
+
+fn setup_retry_backoff(attempt: u64) -> Duration {
+    let mut delay = INITIAL_SETUP_RETRY_DELAY;
+    for _ in 1..attempt {
+        delay = delay.saturating_mul(2).min(MAX_SETUP_RETRY_DELAY);
+    }
+    delay
 }
 
 fn unbounded_retry_status(retry_count: u64, retry_delay: Duration) -> String {

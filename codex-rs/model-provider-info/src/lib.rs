@@ -31,6 +31,7 @@ const DEFAULT_STREAM_SETUP_TIMEOUT_MS: u64 = 60_000;
 const DEFAULT_BEDROCK_SAMPLING_TIMEOUT_MS: u64 = 300_000;
 const DEFAULT_STREAM_MAX_RETRIES: u64 = 5;
 const DEFAULT_REQUEST_MAX_RETRIES: u64 = 4;
+const BEDROCK_REQUEST_RETRY_BASE_DELAY: Duration = Duration::from_secs(2);
 const DEFAULT_AWS_CREDENTIAL_EXPORT_TIMEOUT_MS: u64 = 30_000;
 const DEFAULT_AWS_AUTH_REFRESH_TIMEOUT_MS: u64 = 300_000;
 pub const DEFAULT_WEBSOCKET_CONNECT_TIMEOUT_MS: u64 = 15_000;
@@ -376,10 +377,15 @@ impl ModelProviderInfo {
             .unwrap_or_else(|| default_base_url.to_string());
 
         let headers = self.build_header_map()?;
+        let bedrock = self.is_amazon_bedrock();
         let retry = ApiRetryConfig {
             max_attempts: self.request_max_retries(),
-            base_delay: Duration::from_millis(200),
-            retry_429: false,
+            base_delay: if bedrock {
+                BEDROCK_REQUEST_RETRY_BASE_DELAY
+            } else {
+                Duration::from_millis(200)
+            },
+            retry_429: bedrock,
             retry_5xx: true,
             retry_transport: true,
         };

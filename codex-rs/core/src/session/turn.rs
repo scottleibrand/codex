@@ -143,8 +143,13 @@ use uuid::Uuid;
 
 const POST_SAMPLING_TOKEN_ESTIMATE_TARGET: &str = "codex_core::post_sampling_token_estimate";
 
-fn should_emit_sampling_settings_effective(thread_source: Option<&ThreadSource>) -> bool {
-    matches!(thread_source, None | Some(ThreadSource::User))
+fn should_emit_sampling_settings_effective(
+    thread_source: Option<&ThreadSource>,
+    sampling_attempt: u64,
+) -> bool {
+    // Retries use the same effective settings. Emitting again adds no
+    // information and can make monitoring confuse retry churn with output.
+    matches!(thread_source, None | Some(ThreadSource::User)) && sampling_attempt == 0
 }
 
 /// Explicit MCP startup requirements retained across restarts within one user turn.
@@ -1537,6 +1542,7 @@ async fn run_sampling_request(
     );
     let max_retries = turn_context.provider.info().stream_max_retries();
     let mut retry_state = ResponsesStreamRetryState::default();
+    let mut stream_established = false;
     let mut initial_input = Some(input);
     let mut original_input = None;
     let mut executed_tool_calls_by_output = HashMap::new();
@@ -1584,6 +1590,7 @@ async fn run_sampling_request(
             cancellation_token.child_token(),
             &sampling_request_id,
             sampling_attempt,
+            &mut stream_established,
         )
         .await
         {
@@ -1632,6 +1639,7 @@ async fn run_sampling_request(
             &sess,
             &turn_context,
             ResponsesStreamRequest::Sampling,
+            stream_established,
         )
         .await
         {
@@ -2423,6 +2431,7 @@ async fn try_run_sampling_request(
     cancellation_token: CancellationToken,
     sampling_request_id: &str,
     sampling_attempt: u64,
+    stream_established: &mut bool,
 ) -> CodexResult<SamplingRequestResult> {
     let turn_context = Arc::clone(&step_context.turn);
     feedback_tags!(
@@ -2444,7 +2453,10 @@ async fn try_run_sampling_request(
         .features
         .enabled(Feature::ConcurrentReasoningSummaries)
         && turn_context.provider.info().is_openai();
-    if should_emit_sampling_settings_effective(responses_metadata.thread_source.as_ref()) {
+    if should_emit_sampling_settings_effective(
+        responses_metadata.thread_source.as_ref(),
+        sampling_attempt,
+    ) {
         sess.send_event(
             &turn_context,
             EventMsg::SamplingSettingsEffective(SamplingSettingsEffectiveEvent {
@@ -2487,7 +2499,11 @@ async fn try_run_sampling_request(
         }
     };
     let mut stream = match stream_result {
-        Ok(stream) => stream?,
+        Ok(stream) => {
+            let stream = stream?;
+            *stream_established = true;
+            stream
+        }
         Err(codex_async_utils::CancelErr::Cancelled) => {
             return Err(CodexErr::TurnAborted);
         }

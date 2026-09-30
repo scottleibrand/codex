@@ -364,6 +364,12 @@ pub(crate) async fn apply_spawn_agent_role(
     apply_role_to_config(config, role_name)
         .await
         .map_err(FunctionCallError::RespondToModel)?;
+    if let Some(model) = config.model.as_deref() {
+        config.model = Some(canonicalize_bedrock_spawn_model_id(
+            &config.model_provider_id,
+            model,
+        ));
+    }
     if config.model == previous_model && config.model_reasoning_effort == previous_reasoning_effort
     {
         return Ok(());

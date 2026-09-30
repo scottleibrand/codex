@@ -534,6 +534,7 @@ async fn run_remote_compaction_request_v2(
                     sess,
                     turn_context,
                     ResponsesStreamRequest::RemoteCompactionV2,
+                    false,
                 )
                 .await?;
             }
