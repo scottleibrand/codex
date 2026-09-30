@@ -158,7 +158,6 @@ impl StatusIndicatorWidget {
         &self.header
     }
 
-    #[cfg(test)]
     pub(crate) fn details(&self) -> Option<&str> {
         self.details.as_deref()
     }

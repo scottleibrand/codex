@@ -1,0 +1,7 @@
+---
+source: tui/src/chatwidget/tests/status_command_tests.rs
+assertion_line: 146
+expression: model_lines
+---
+│  Effective model:      gpt-5.2 (reasoning medium, summaries auto) │
+│  Selected model:       gpt-5.4 (reasoning default)                │

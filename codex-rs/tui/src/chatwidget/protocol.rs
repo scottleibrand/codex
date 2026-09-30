@@ -351,11 +351,10 @@ impl ChatWidget {
         }
         // Tool and hook activity can recreate a hidden row with its default
         // heading. Restore the selected status before that row is rendered.
-        if self
-            .bottom_pane
-            .status_widget()
-            .is_some_and(|status| status.header() != self.status_state.current_status.header)
-        {
+        if self.bottom_pane.status_widget().is_some_and(|status| {
+            status.header() != self.status_state.current_status.header
+                || status.details() != self.status_state.current_status.details.as_deref()
+        }) {
             self.bottom_pane.update_status(
                 self.status_state.current_status.header.clone(),
                 self.status_state.current_status.details.clone(),

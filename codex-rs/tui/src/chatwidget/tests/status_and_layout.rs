@@ -4813,7 +4813,8 @@ async fn reasoning_delta_restores_recreated_status_indicator_header() {
         .bottom_pane
         .status_widget()
         .expect("status indicator should be recreated");
-    assert_eq!(status.header(), "Checking files");
+    assert_eq!(status.header(), "Working");
+    assert_eq!(status.details(), Some("Checking files"));
 
     chat.on_agent_reasoning_delta(" and preparing a response".to_string());
 
@@ -4821,7 +4822,11 @@ async fn reasoning_delta_restores_recreated_status_indicator_header() {
         .bottom_pane
         .status_widget()
         .expect("status indicator should remain visible");
-    assert_eq!(status.header(), "Checking files and preparing a response");
+    assert_eq!(status.header(), "Working");
+    assert_eq!(
+        status.details(),
+        Some("Checking files and preparing a response")
+    );
 
     let width: u16 = 80;
     let height = chat.desired_height(width);

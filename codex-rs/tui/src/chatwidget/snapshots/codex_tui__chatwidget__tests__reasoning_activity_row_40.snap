@@ -2,4 +2,6 @@
 source: tui/src/chatwidget/tests/reasoning_status_tests.rs
 expression: terminal.backend()
 ---
-"• Preparing evidence report (42s • esc …"
+"• Working (42s • esc to interrupt) · 1 …"
+"  └ Preparing evidence report           "
+"                                        "

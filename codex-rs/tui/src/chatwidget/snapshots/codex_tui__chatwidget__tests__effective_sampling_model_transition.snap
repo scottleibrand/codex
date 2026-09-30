@@ -1,0 +1,6 @@
+---
+source: tui/src/chatwidget/tests/app_server.rs
+assertion_line: 656
+expression: rendered
+---
+• Active model changed to gpt-5.4 high

@@ -1,5 +1,6 @@
 ---
 source: tui/src/chatwidget/tests/slash_commands.rs
+assertion_line: 2093
 expression: "whole_status.replace(&directory,\n\"[[workspace]]\").replace(crate::version::CODEX_CLI_VERSION, \"VERSION\")"
 ---
 >_ OpenAI Codex (vVERSION)
@@ -7,7 +8,8 @@ expression: "whole_status.replace(&directory,\n\"[[workspace]]\").replace(crate:
 Visit https://chatgpt.com/codex/settings/usage for up-to-date
 information on rate limits and credits
 
- Model:                gpt-5.5 (reasoning medium, summaries auto)
+ Effective model:      gpt-5.5 (reasoning medium, summaries auto)
+ Selected model:       gpt-5.5 (reasoning default)
  Model provider:       openai
  Directory:            [[workspace]]
  Permissions:          Read Only (Ask for approval)

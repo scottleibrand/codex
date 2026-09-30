@@ -1,4 +1,5 @@
-//! Reasoning activity retains the latest usable line through empty items and status-row replacement.
+//! Reasoning activity retains the latest usable line as status details through
+//! empty items and status-row replacement while the Working row stays intact.
 
 use super::*;
 use pretty_assertions::assert_eq;
@@ -38,25 +39,24 @@ async fn reasoning_status_accepts_bold_text_with_a_plain_suffix() {
     chat.on_task_started();
     handle_agent_reasoning_started(&mut chat, "reasoning");
 
+    let details = |chat: &ChatWidget| {
+        chat.bottom_pane
+            .status_widget()
+            .unwrap()
+            .details()
+            .map(str::to_string)
+    };
     delta(&mut chat, "reasoning", "**Checking tests");
-    let before_close = chat
-        .bottom_pane
-        .status_widget()
-        .unwrap()
-        .header()
-        .to_string();
+    let before_close = details(&chat);
     delta(&mut chat, "reasoning", "**: running suite");
-    let after_close = chat
-        .bottom_pane
-        .status_widget()
-        .unwrap()
-        .header()
-        .to_string();
+    let after_close = details(&chat);
 
     insta::assert_debug_snapshot!(vec![before_close, after_close], @r###"
     [
-        "Working",
-        "Checking tests: running suite",
+        None,
+        Some(
+            "Checking tests: running suite",
+        ),
     ]
     "###);
 }
@@ -65,33 +65,33 @@ async fn reasoning_status_accepts_bold_text_with_a_plain_suffix() {
 async fn reasoning_status_tracks_items_and_restores_after_tool_activity() {
     let (mut chat, _rx, _ops) = make_chatwidget_manual(/*model_override*/ None).await;
     chat.on_task_started();
-    let mut headers = Vec::new();
-    let capture = |chat: &ChatWidget, headers: &mut Vec<String>| {
-        headers.push(
+    let mut details = Vec::new();
+    let capture = |chat: &ChatWidget, details: &mut Vec<Option<String>>| {
+        details.push(
             chat.bottom_pane
                 .status_widget()
                 .expect("running status")
-                .header()
-                .to_string(),
+                .details()
+                .map(str::to_string),
         );
     };
 
     handle_agent_reasoning_started(&mut chat, "first");
     delta(&mut chat, "first", "**Researching backend");
-    capture(&chat, &mut headers);
+    capture(&chat, &mut details);
     delta(&mut chat, "first", " freshness**");
-    capture(&chat, &mut headers);
+    capture(&chat, &mut details);
     complete(&mut chat, "first");
     delta(&mut chat, "first", "**Late old header**");
-    capture(&chat, &mut headers);
+    capture(&chat, &mut details);
 
     // A tool recreates the row after streamed commentary has hidden it.
     chat.bottom_pane.hide_status_indicator();
     begin_unified_exec_startup(&mut chat, "tool-1", "process-1", "sleep 2");
-    capture(&chat, &mut headers);
+    capture(&chat, &mut details);
 
     handle_agent_reasoning_started(&mut chat, "second");
-    capture(&chat, &mut headers);
+    capture(&chat, &mut details);
     chat.handle_server_notification(
         ServerNotification::ReasoningSummaryPartAdded(
             codex_app_server_protocol::ReasoningSummaryPartAddedNotification {
@@ -106,17 +106,17 @@ async fn reasoning_status_tracks_items_and_restores_after_tool_activity() {
     complete(&mut chat, "first");
     delta(&mut chat, "first", "**Stale heading**");
     delta(&mut chat, "second", "No summary heading is available.");
-    capture(&chat, &mut headers);
+    capture(&chat, &mut details);
     delta(&mut chat, "second", "\n**Preparing evidence report**");
-    capture(&chat, &mut headers);
+    capture(&chat, &mut details);
 
-    insta::assert_debug_snapshot!(headers);
+    insta::assert_debug_snapshot!(details);
     let mut timer = crate::status_indicator_widget::StatusTimer::default();
     timer.pause_at(std::time::Instant::now());
     timer.reset(std::time::Duration::from_secs(/*secs*/ 42));
     for width in [80, 40] {
         let mut terminal =
-            ratatui::Terminal::new(ratatui::backend::TestBackend::new(width, /*height*/ 1))
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(width, /*height*/ 3))
                 .expect("terminal");
         terminal
             .draw(|frame| {
@@ -160,14 +160,14 @@ async fn voice_handoff_preserves_typed_reasoning_and_ignores_private_items() {
         Some("typed")
     );
     assert_eq!(
-        chat.bottom_pane.status_widget().unwrap().header(),
-        "Checking repository"
+        chat.bottom_pane.status_widget().unwrap().details(),
+        Some("Checking repository")
     );
 
     delta(&mut chat, "typed", "\n**Verifying changes**");
     assert_eq!(
-        chat.bottom_pane.status_widget().unwrap().header(),
-        "Verifying changes"
+        chat.bottom_pane.status_widget().unwrap().details(),
+        Some("Verifying changes")
     );
     complete(&mut chat, "typed");
     assert_eq!(chat.status_state.reasoning_item_id, None);
@@ -194,7 +194,11 @@ async fn reasoning_status_preserves_an_explicit_wait_and_restores_the_heading() 
     chat.restore_reasoning_status_header();
     assert_eq!(
         chat.bottom_pane.status_widget().unwrap().header(),
-        "Choosing the missing-data fix"
+        "Working"
+    );
+    assert_eq!(
+        chat.bottom_pane.status_widget().unwrap().details(),
+        Some("Choosing the missing-data fix")
     );
 }
 
@@ -224,7 +228,10 @@ async fn reasoning_status_replay_retains_last_usable_heading() {
             "turn-1".to_string(),
             ThreadItemRenderSource::Replay(ReplayKind::ThreadSnapshot),
         );
-        assert_eq!(chat.bottom_pane.status_widget().unwrap().header(), expected);
+        assert_eq!(
+            chat.bottom_pane.status_widget().unwrap().details(),
+            Some(expected)
+        );
     }
 }
 
@@ -240,19 +247,23 @@ async fn reasoning_status_accepts_plain_lines_and_ignores_empty_sections() {
     );
     assert_eq!(
         chat.bottom_pane.status_widget().unwrap().header(),
-        "Preparing response"
+        "Working"
+    );
+    assert_eq!(
+        chat.bottom_pane.status_widget().unwrap().details(),
+        Some("Preparing response")
     );
     complete(&mut chat, "first");
     handle_agent_reasoning_started(&mut chat, "second");
     delta(&mut chat, "second", "<!-- no public update -->");
     assert_eq!(
-        chat.bottom_pane.status_widget().unwrap().header(),
-        "Preparing response"
+        chat.bottom_pane.status_widget().unwrap().details(),
+        Some("Preparing response")
     );
     delta(&mut chat, "second", "\n**Verifying results**");
     assert_eq!(
-        chat.bottom_pane.status_widget().unwrap().header(),
-        "Verifying results"
+        chat.bottom_pane.status_widget().unwrap().details(),
+        Some("Verifying results")
     );
 }
 
@@ -308,7 +319,7 @@ async fn completed_reasoning_stays_in_expanded_transcript_for_live_and_replay() 
         Compact history:
 
         Live status:
-        The playback clock preserves elapsed time.
+        Working
         Expanded transcript:
         • Inspecting repository structure
         • Mapping the app structure

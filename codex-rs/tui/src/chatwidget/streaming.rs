@@ -22,6 +22,11 @@ fn latest_summary_line(text: &str) -> Option<String> {
     })
 }
 
+/// Reasoning summaries render as status details below the intact Working row.
+/// Two wrapped lines surface long thoughts without displacing the elapsed,
+/// interrupt, and background-activity affordances on the header line.
+const REASONING_DETAILS_MAX_LINES: usize = 2;
+
 impl ChatWidget {
     pub(super) fn on_reasoning_item_started(&mut self, id: String) {
         if self.status_state.reasoning_resume_turn_id.take().is_some()
@@ -49,9 +54,14 @@ impl ChatWidget {
         }
         self.reasoning_header =
             latest_summary_line(&self.reasoning_buffer).or(self.reasoning_header.take());
-        if let Some(header) = self.reasoning_header.clone() {
+        if let Some(summary) = self.reasoning_header.clone() {
             self.status_state.terminal_title_status_kind = TerminalTitleStatusKind::Thinking;
-            self.set_status_header(header);
+            self.set_status(
+                String::from("Working"),
+                Some(summary),
+                StatusDetailsCapitalization::CapitalizeFirst,
+                REASONING_DETAILS_MAX_LINES,
+            );
         } else if self.bottom_pane.is_task_running()
             || self.status_state.current_status.is_guardian_review()
         {
@@ -296,21 +306,23 @@ impl ChatWidget {
 
         let status = &self.status_state.current_status;
         if self.status_state.terminal_title_status_kind == TerminalTitleStatusKind::Thinking
-            && status.header == header
-            && status.details.is_none()
-            && status.details_max_lines == STATUS_DETAILS_DEFAULT_MAX_LINES
+            && status.details.as_deref() == Some(header)
+            && status.details_max_lines == REASONING_DETAILS_MAX_LINES
             && self
                 .bottom_pane
                 .status_widget()
-                .is_none_or(|status| status.header() == header)
+                .is_none_or(|status| status.details() == Some(header))
         {
             return;
         }
 
-        // Update the shimmer header to the extracted reasoning chunk header.
-        let header = header.to_string();
         self.status_state.terminal_title_status_kind = TerminalTitleStatusKind::Thinking;
-        if !self.set_status_header(header) {
+        if !self.set_status(
+            String::from("Working"),
+            Some(header.to_string()),
+            StatusDetailsCapitalization::CapitalizeFirst,
+            REASONING_DETAILS_MAX_LINES,
+        ) {
             self.request_redraw();
         }
     }
