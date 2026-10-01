@@ -6,6 +6,7 @@ use codex_model_provider_info::ModelProviderInfo;
 use codex_model_provider_info::WireApi;
 use codex_model_provider_info::built_in_model_providers;
 use codex_protocol::protocol::EventMsg;
+use codex_protocol::protocol::Op;
 use codex_protocol::user_input::UserInput;
 use core_test_support::responses;
 use core_test_support::skip_if_no_network;
@@ -105,6 +106,63 @@ async fn retries_on_early_close() {
     );
 
     server.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn interrupt_during_setup_retry_does_not_wait_for_backoff() {
+    skip_if_no_network!();
+    let listener = TokioTcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let (release_tx, release_rx) = oneshot::channel::<()>();
+    let server_task = tokio::spawn(async move {
+        let (stalled_socket, _) = listener.accept().await.unwrap();
+        let _ = release_rx.await;
+        drop(stalled_socket);
+    });
+
+    let openai_base_url = None;
+    let mut provider = built_in_model_providers(openai_base_url)["openai"].clone();
+    let base_url = format!("http://{address}/v1");
+    provider.base_url = Some(base_url.clone());
+    provider.env_key = None;
+    provider.experimental_bearer_token = None;
+    provider.auth = None;
+    provider.aws = None;
+    provider.request_max_retries = Some(0);
+    // The first retry is immediate; the second waits 60s.
+    provider.stream_max_retries = Some(2);
+    provider.stream_setup_timeout_ms = Some(50);
+    provider.requires_openai_auth = false;
+    provider.supports_websockets = false;
+    let TestCodex { codex, .. } = test_codex()
+        .with_config(move |config| config.model_provider = provider)
+        .build_with_base_url(base_url)
+        .await
+        .unwrap();
+    codex
+        .start_or_steer_turn(TurnInputRequest::user_input(vec![UserInput::Text {
+            text: "wait for provider recovery".into(),
+            text_elements: Vec::new(),
+        }]))
+        .await
+        .unwrap();
+    tokio::time::timeout(
+        Duration::from_secs(5),
+        wait_for_event(&codex, |event| {
+            matches!(event, EventMsg::StreamError(event) if event.message.contains("waiting 60s"))
+        }),
+    )
+    .await
+    .expect("repeated setup timeouts must enter the long retry backoff");
+    codex.submit(Op::Interrupt).await.unwrap();
+    tokio::time::timeout(
+        Duration::from_secs(2),
+        wait_for_event(&codex, |event| matches!(event, EventMsg::TurnAborted(_))),
+    )
+    .await
+    .expect("interrupt must not wait for the 60-second backoff");
+    let _ = release_tx.send(());
+    server_task.await.unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

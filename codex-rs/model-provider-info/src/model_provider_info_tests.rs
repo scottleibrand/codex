@@ -6,6 +6,23 @@ use std::num::NonZeroU64;
 use tempfile::tempdir;
 
 #[test]
+fn stream_retry_budget_defaults_to_ten_and_honors_explicit_overrides() {
+    let openai_base_url = None;
+    let providers = built_in_model_providers(openai_base_url);
+    let mut bedrock = providers[AMAZON_BEDROCK_PROVIDER_ID].clone();
+    assert_eq!(bedrock.stream_max_retries(), 10);
+    assert_eq!(
+        providers[AMAZON_BEDROCK_RUNTIME_PROVIDER_ID].stream_max_retries(),
+        10
+    );
+    assert_eq!(providers[OPENAI_PROVIDER_ID].stream_max_retries(), 10);
+    bedrock.stream_max_retries = Some(2);
+    assert_eq!(bedrock.stream_max_retries(), 2);
+    bedrock.stream_max_retries = Some(500);
+    assert_eq!(bedrock.stream_max_retries(), 100);
+}
+
+#[test]
 fn bedrock_429_uses_exponential_retries() {
     let providers = built_in_model_providers(/*openai_base_url*/ None);
     let bedrock = providers[AMAZON_BEDROCK_PROVIDER_ID]

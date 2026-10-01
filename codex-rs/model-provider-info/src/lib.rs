@@ -29,7 +29,9 @@ use std::time::Duration;
 const DEFAULT_STREAM_IDLE_TIMEOUT_MS: u64 = 300_000;
 const DEFAULT_STREAM_SETUP_TIMEOUT_MS: u64 = 60_000;
 const DEFAULT_BEDROCK_SAMPLING_TIMEOUT_MS: u64 = 300_000;
-const DEFAULT_STREAM_MAX_RETRIES: u64 = 5;
+// Ten retries on the 30s doubling HTTP backoff wait out roughly 8.5 hours of
+// provider outage before a turn fails.
+const DEFAULT_STREAM_MAX_RETRIES: u64 = 10;
 const DEFAULT_REQUEST_MAX_RETRIES: u64 = 4;
 const BEDROCK_REQUEST_RETRY_BASE_DELAY: Duration = Duration::from_secs(2);
 const DEFAULT_AWS_CREDENTIAL_EXPORT_TIMEOUT_MS: u64 = 30_000;

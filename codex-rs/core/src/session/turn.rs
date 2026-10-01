@@ -1641,7 +1641,9 @@ async fn run_sampling_request(
             ResponsesStreamRequest::Sampling,
             stream_established,
         )
+        .or_cancel(&cancellation_token)
         .await
+        .map_err(|_| CodexErr::TurnAborted)?
         {
             warn!(
                 thread_id = %sess.thread_id,

@@ -1,9 +1,11 @@
 use super::ResponsesStreamRequest;
 use super::is_unbounded_interactive_retry_error;
 use super::log_retry;
+use super::response_retry_delay;
 use super::setup_retry_backoff;
 use super::unbounded_retry_status;
 use crate::session::tests::make_session_and_context;
+use codex_model_provider_info::built_in_model_providers;
 use codex_protocol::error::CodexErr;
 use std::time::Duration;
 use tracing_test::internal::MockWriter;
@@ -48,12 +50,50 @@ fn unbounded_retry_status_includes_retry_counter_and_delay() {
 
 #[test]
 fn setup_timeout_backoff_spans_multi_minute_failures() {
-    assert_eq!(setup_retry_backoff(1), Duration::from_secs(30));
+    assert!(setup_retry_backoff(1) < Duration::from_secs(1));
     assert_eq!(setup_retry_backoff(2), Duration::from_secs(60));
     assert_eq!(setup_retry_backoff(3), Duration::from_secs(120));
     assert_eq!(setup_retry_backoff(4), Duration::from_secs(240));
-    assert_eq!(setup_retry_backoff(5), Duration::from_secs(300));
-    assert_eq!(setup_retry_backoff(6), Duration::from_secs(300));
+    assert_eq!(setup_retry_backoff(5), Duration::from_secs(480));
+    assert_eq!(setup_retry_backoff(6), Duration::from_secs(960));
+    assert_eq!(setup_retry_backoff(7), Duration::from_secs(1920));
+    assert_eq!(setup_retry_backoff(8), Duration::from_secs(3840));
+}
+
+#[test]
+fn http_transport_server_errors_use_the_longer_recovery_window() {
+    let err = CodexErr::Stream(
+        "The server had an error while processing your request. Sorry about that!".into(),
+    );
+    assert!(err.is_retryable());
+    // HTTP transport (Bedrock always, other providers after fallback) waits out outages.
+    assert_eq!(
+        response_retry_delay(&err, /*websocket_active*/ false, 5),
+        Duration::from_secs(480),
+    );
+    // An active WebSocket retries quickly so the HTTPS fallback is reached promptly.
+    assert!(response_retry_delay(&err, /*websocket_active*/ true, 1) < Duration::from_secs(1));
+    // Setup timeouts take the long schedule even on an active WebSocket.
+    let setup_timeout = CodexErr::ResponseStreamSetupTimeout(Duration::from_secs(60));
+    assert_eq!(
+        response_retry_delay(&setup_timeout, /*websocket_active*/ true, 2),
+        Duration::from_secs(60),
+    );
+}
+
+#[test]
+fn default_retry_budget_outlasts_multi_hour_provider_outages() {
+    let openai_base_url = None;
+    let providers = built_in_model_providers(openai_base_url);
+    let err = CodexErr::Stream("stream closed before response.completed".into());
+    for provider in ["amazon-bedrock", "openai"] {
+        let max_retries = providers[provider].stream_max_retries();
+        let total: Duration = (1..=max_retries)
+            .map(|attempt| response_retry_delay(&err, /*websocket_active*/ false, attempt))
+            .sum();
+        // 2026-09-30: one Bedrock session failed every request for 73 minutes.
+        assert!(total >= Duration::from_secs(8 * 3600), "{provider}: {total:?}");
+    }
 }
 
 #[tokio::test]

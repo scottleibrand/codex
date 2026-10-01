@@ -17,7 +17,6 @@ use tracing::warn;
 const INITIAL_CONNECTION_RETRY_DELAY: Duration = Duration::from_secs(5);
 const MAX_CONNECTION_RETRY_DELAY: Duration = Duration::from_secs(60);
 const INITIAL_SETUP_RETRY_DELAY: Duration = Duration::from_secs(30);
-const MAX_SETUP_RETRY_DELAY: Duration = Duration::from_secs(300);
 
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum ResponsesStreamRequest {
@@ -114,10 +113,8 @@ pub(crate) async fn handle_retryable_response_stream_error(
     if retry_state.retries < max_retries {
         retry_state.retries += 1;
         let retry_count = retry_state.retries;
-        let delay = err.retry_delay().unwrap_or_else(|| match err.details() {
-            CodexErrorDetails::ResponseStreamSetupTimeout(_) => setup_retry_backoff(retry_count),
-            _ => backoff(retry_count),
-        });
+        let websocket_active = sess.services.model_client.responses_websocket_enabled();
+        let delay = response_retry_delay(&err, websocket_active, retry_count);
         log_retry(request, turn_context, &err, retry_count, max_retries, delay);
 
         // In release builds, hide the first websocket retry notification to reduce noisy
@@ -156,10 +153,35 @@ fn is_unbounded_interactive_retry_error(
                 && matches!(err.details(), CodexErrorDetails::ConnectionFailed(_))))
 }
 
+/// While a WebSocket transport is still active, retry quickly so an exhausted
+/// budget reaches the HTTPS fallback promptly. Once on HTTP (Bedrock always,
+/// other providers after fallback) there is no further fallback, so wait out
+/// provider outages with the long doubling backoff.
+fn response_retry_delay(err: &CodexErr, websocket_active: bool, attempt: u64) -> Duration {
+    err.retry_delay().unwrap_or_else(|| {
+        if websocket_active
+            && !matches!(
+                err.details(),
+                CodexErrorDetails::ResponseStreamSetupTimeout(_)
+            )
+        {
+            backoff(attempt)
+        } else {
+            setup_retry_backoff(attempt)
+        }
+    })
+}
+
+/// The first retry is immediate (a one-off stream blip usually succeeds on the
+/// next attempt); later retries wait 60s and keep doubling with no cap, so the
+/// default ten retries ride out roughly 8.5 hours of provider outage.
 fn setup_retry_backoff(attempt: u64) -> Duration {
+    if attempt <= 1 {
+        return backoff(attempt);
+    }
     let mut delay = INITIAL_SETUP_RETRY_DELAY;
     for _ in 1..attempt {
-        delay = delay.saturating_mul(2).min(MAX_SETUP_RETRY_DELAY);
+        delay = delay.saturating_mul(2);
     }
     delay
 }
