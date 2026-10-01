@@ -7,6 +7,7 @@ use super::unbounded_retry_status;
 use crate::session::tests::make_session_and_context;
 use codex_model_provider_info::built_in_model_providers;
 use codex_protocol::error::CodexErr;
+use codex_protocol::error::CodexErrorDetails;
 use std::time::Duration;
 use tracing_test::internal::MockWriter;
 
@@ -82,6 +83,41 @@ fn http_transport_server_errors_use_the_longer_recovery_window() {
 }
 
 #[test]
+fn retry_hints_are_a_minimum_not_an_exponential_backoff_cap() {
+    let short_hint = CodexErr::new(CodexErrorDetails::RateLimitExceeded(
+        "try again later".into(),
+    ))
+    .with_retry_delay(Duration::from_secs(300));
+    assert!(short_hint.is_retryable());
+    for (attempt, expected_seconds) in [(5, 480), (6, 960), (10, 15_360)] {
+        assert_eq!(
+            response_retry_delay(&short_hint, false, attempt),
+            Duration::from_secs(expected_seconds),
+        );
+    }
+    let long_hint = CodexErr::new(CodexErrorDetails::RateLimitExceeded(
+        "try again later".into(),
+    ))
+    .with_retry_delay(Duration::from_secs(3600));
+    assert_eq!(
+        response_retry_delay(&long_hint, false, 2),
+        Duration::from_secs(3600),
+    );
+    assert_eq!(
+        response_retry_delay(&long_hint, true, 2),
+        Duration::from_secs(3600),
+    );
+    assert_eq!(
+        response_retry_delay(&long_hint, false, 8),
+        Duration::from_secs(3840),
+    );
+    let total: Duration = (1..=10)
+        .map(|attempt| response_retry_delay(&short_hint, false, attempt))
+        .sum();
+    assert!(total >= Duration::from_secs(8 * 3600));
+}
+
+#[test]
 fn default_retry_budget_outlasts_multi_hour_provider_outages() {
     let openai_base_url = None;
     let providers = built_in_model_providers(openai_base_url);
@@ -92,7 +128,10 @@ fn default_retry_budget_outlasts_multi_hour_provider_outages() {
             .map(|attempt| response_retry_delay(&err, /*websocket_active*/ false, attempt))
             .sum();
         // 2026-09-30: one Bedrock session failed every request for 73 minutes.
-        assert!(total >= Duration::from_secs(8 * 3600), "{provider}: {total:?}");
+        assert!(
+            total >= Duration::from_secs(8 * 3600),
+            "{provider}: {total:?}"
+        );
     }
 }
 

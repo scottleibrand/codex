@@ -158,17 +158,17 @@ fn is_unbounded_interactive_retry_error(
 /// other providers after fallback) there is no further fallback, so wait out
 /// provider outages with the long doubling backoff.
 fn response_retry_delay(err: &CodexErr, websocket_active: bool, attempt: u64) -> Duration {
-    err.retry_delay().unwrap_or_else(|| {
-        if websocket_active
-            && !matches!(
-                err.details(),
-                CodexErrorDetails::ResponseStreamSetupTimeout(_)
-            )
-        {
-            backoff(attempt)
-        } else {
-            setup_retry_backoff(attempt)
-        }
+    let backoff_delay = if websocket_active
+        && !matches!(
+            err.details(),
+            CodexErrorDetails::ResponseStreamSetupTimeout(_)
+        ) {
+        backoff(attempt)
+    } else {
+        setup_retry_backoff(attempt)
+    };
+    err.retry_delay().map_or(backoff_delay, |server_delay| {
+        server_delay.max(backoff_delay)
     })
 }
 

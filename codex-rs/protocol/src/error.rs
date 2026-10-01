@@ -381,6 +381,13 @@ impl CodexErr {
                     || error.status == StatusCode::TOO_MANY_REQUESTS
                     || error.status == StatusCode::REQUEST_TIMEOUT
             }
+            CodexErrorDetails::UnexpectedStatus(error) => !matches!(
+                error.status,
+                StatusCode::BAD_REQUEST
+                    | StatusCode::UNAUTHORIZED
+                    | StatusCode::PAYMENT_REQUIRED
+                    | StatusCode::FORBIDDEN
+            ),
             CodexErrorDetails::TurnAborted
             | CodexErrorDetails::SessionBudgetExceeded
             | CodexErrorDetails::Interrupted
@@ -408,7 +415,6 @@ impl CodexErr {
             | CodexErrorDetails::RateLimitExceeded(_)
             | CodexErrorDetails::Timeout
             | CodexErrorDetails::RequestTimeout
-            | CodexErrorDetails::UnexpectedStatus(_)
             | CodexErrorDetails::ResponseStreamFailed(_)
             | CodexErrorDetails::ConnectionFailed(_)
             | CodexErrorDetails::InternalServerError

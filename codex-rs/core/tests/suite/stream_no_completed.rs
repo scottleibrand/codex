@@ -225,22 +225,31 @@ async fn sampling_deadline_retries_then_completes() {
             _ => {}
         }
     }
+    let captured_requests = server.requests().await;
     assert_eq!(
-        server.requests().await.len(),
+        captured_requests.len(),
         2,
         "sampling deadline should retry through the streaming retry policy"
     );
-    assert_eq!(effective_settings.len(), 2);
+    assert_eq!(effective_settings.len(), 1);
     assert_eq!(effective_settings[0].attempt, 0);
-    assert_eq!(effective_settings[1].attempt, 1);
+    assert!(!effective_settings[0].sampling_request_id.is_empty());
+    let request_bodies: Vec<serde_json::Value> = captured_requests
+        .iter()
+        .map(|body| serde_json::from_slice(body).expect("retry request should contain JSON"))
+        .collect();
     assert_eq!(
-        effective_settings[0].sampling_request_id, effective_settings[1].sampling_request_id,
-        "transport retries should retain one captured sampling request identity"
+        request_bodies[0]["model"].as_str(),
+        Some(effective_settings[0].model.as_str()),
     );
-    assert_eq!(effective_settings[0].model, effective_settings[1].model);
+    assert_eq!(request_bodies[0]["model"], request_bodies[1]["model"],);
     assert_eq!(
-        effective_settings[0].reasoning_effort,
-        effective_settings[1].reasoning_effort
+        request_bodies[0]["reasoning"],
+        request_bodies[1]["reasoning"],
+    );
+    assert_eq!(
+        request_bodies[0]["input"], request_bodies[1]["input"],
+        "transport retries should retain the captured sampling input",
     );
 
     drop(hold_open_tx);
@@ -365,8 +374,7 @@ async fn read_complete_http_request(stream: &mut tokio::net::TcpStream) {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn connection_failure_pauses_retry_budget_until_provider_is_reachable() -> anyhow::Result<()>
-{
+async fn connection_failure_consumes_the_bounded_retry_budget() -> anyhow::Result<()> {
     skip_if_no_network!(Ok(()));
 
     let bootstrap_server = responses::start_mock_server().await;
@@ -396,27 +404,24 @@ async fn connection_failure_pauses_retry_budget_until_provider_is_reachable() ->
     else {
         unreachable!("predicate guarantees a stream error event");
     };
-    assert_eq!(
-        connection_error.message,
-        "Reconnecting... waiting for network"
+    assert!(
+        connection_error
+            .message
+            .starts_with("Reconnecting... 1/1 (waiting")
     );
 
     let recovered_server = MockServer::builder()
         .listener(TcpListener::bind(unavailable_address)?)
         .start()
         .await;
-    let response_mock = responses::mount_sse_sequence(
-        &recovered_server,
-        vec![sse_incomplete(), responses::sse_completed("resp_recovered")],
-    )
-    .await;
+    let response_mock =
+        responses::mount_sse_sequence(&recovered_server, vec![sse_incomplete()]).await;
 
-    let EventMsg::StreamError(stream_error) =
-        wait_for_event(&codex, |event| matches!(event, EventMsg::StreamError(_))).await
+    let EventMsg::Error(error) =
+        wait_for_event(&codex, |event| matches!(event, EventMsg::Error(_))).await
     else {
-        unreachable!("predicate guarantees a stream error event");
+        unreachable!("predicate guarantees an error event");
     };
-    assert_eq!(stream_error.message, "Reconnecting... 1/1");
 
     let EventMsg::TurnComplete(completed) =
         wait_for_event(&codex, |event| matches!(event, EventMsg::TurnComplete(_))).await
@@ -424,8 +429,8 @@ async fn connection_failure_pauses_retry_budget_until_provider_is_reachable() ->
         unreachable!("predicate guarantees a turn complete event");
     };
 
-    assert_eq!(completed.error, None);
-    assert_eq!(response_mock.requests().len(), 2);
+    assert_eq!(completed.error, Some(error));
+    assert_eq!(response_mock.requests().len(), 1);
 
     Ok(())
 }

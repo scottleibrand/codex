@@ -98,6 +98,34 @@ fn exhausted_http_retries_preserve_transient_and_permanent_statuses() {
     }
 }
 
+#[test]
+fn unexpected_http_status_preserves_temporary_errors_not_auth_or_payment_failures() {
+    for (status, expected) in [
+        (StatusCode::REQUEST_TIMEOUT, true),
+        (StatusCode::TOO_MANY_REQUESTS, true),
+        (StatusCode::INTERNAL_SERVER_ERROR, true),
+        (StatusCode::BAD_GATEWAY, true),
+        (StatusCode::SERVICE_UNAVAILABLE, true),
+        (StatusCode::GATEWAY_TIMEOUT, true),
+        (StatusCode::BAD_REQUEST, false),
+        (StatusCode::UNAUTHORIZED, false),
+        (StatusCode::PAYMENT_REQUIRED, false),
+        (StatusCode::FORBIDDEN, false),
+    ] {
+        let error = CodexErr::UnexpectedStatus(UnexpectedResponseError {
+            status,
+            body: String::new(),
+            user_message: None,
+            url: None,
+            cf_ray: None,
+            request_id: None,
+            identity_authorization_error: None,
+            identity_error_code: None,
+        });
+        assert_eq!(error.is_retryable(), expected, "{status}");
+    }
+}
+
 fn rate_limit_snapshot() -> RateLimitSnapshot {
     let primary_reset_at = Utc
         .with_ymd_and_hms(2024, 1, 1, 1, 0, 0)
