@@ -35,7 +35,7 @@ fn codex_err_debug_preserves_legacy_shape() {
 #[test]
 fn retryability_preserves_error_details_distinctions() {
     let errors = [
-        (CodexErr::ServerOverloaded, false),
+        (CodexErr::ServerOverloaded, true),
         (
             CodexErr::new(CodexErrorDetails::RateLimitExceeded("retry later".into())),
             true,
@@ -45,7 +45,7 @@ fn retryability_preserves_error_details_distinctions() {
                 status: StatusCode::TOO_MANY_REQUESTS,
                 request_id: None,
             }),
-            false,
+            true,
         ),
         (
             CodexErr::UnexpectedStatus(UnexpectedResponseError {
@@ -73,6 +73,28 @@ fn retryability_preserves_error_details_distinctions() {
             expected,
             "unexpected retryability for {err:?}"
         );
+    }
+}
+
+#[test]
+fn exhausted_http_retries_preserve_transient_and_permanent_statuses() {
+    for (status, expected) in [
+        (StatusCode::INTERNAL_SERVER_ERROR, true),
+        (StatusCode::BAD_GATEWAY, true),
+        (StatusCode::SERVICE_UNAVAILABLE, true),
+        (StatusCode::GATEWAY_TIMEOUT, true),
+        (StatusCode::TOO_MANY_REQUESTS, true),
+        (StatusCode::REQUEST_TIMEOUT, true),
+        (StatusCode::BAD_REQUEST, false),
+        (StatusCode::UNAUTHORIZED, false),
+        (StatusCode::FORBIDDEN, false),
+        (StatusCode::PAYMENT_REQUIRED, false),
+    ] {
+        let error = CodexErr::RetryLimit(RetryLimitReachedError {
+            status,
+            request_id: None,
+        });
+        assert_eq!(error.is_retryable(), expected, "{status}");
     }
 }
 

@@ -376,6 +376,11 @@ impl CodexErr {
 
     pub fn is_retryable(&self) -> bool {
         match self.details() {
+            CodexErrorDetails::RetryLimit(error) => {
+                error.status.is_server_error()
+                    || error.status == StatusCode::TOO_MANY_REQUESTS
+                    || error.status == StatusCode::REQUEST_TIMEOUT
+            }
             CodexErrorDetails::TurnAborted
             | CodexErrorDetails::SessionBudgetExceeded
             | CodexErrorDetails::Interrupted
@@ -390,14 +395,12 @@ impl CodexErr {
             | CodexErrorDetails::UnsupportedOperation(_)
             | CodexErrorDetails::Sandbox(_)
             | CodexErrorDetails::LandlockSandboxExecutableNotProvided
-            | CodexErrorDetails::RetryLimit(_)
             | CodexErrorDetails::ContextWindowExceeded
             | CodexErrorDetails::ThreadNotFound(_)
             | CodexErrorDetails::AgentLimitReached { .. }
             | CodexErrorDetails::Spawn
             | CodexErrorDetails::SessionConfiguredNotFirstEvent
             | CodexErrorDetails::UsageLimitReached(_)
-            | CodexErrorDetails::ServerOverloaded
             | CodexErrorDetails::CyberPolicy { .. }
             | CodexErrorDetails::MisalignmentPolicyViolation { .. } => false,
             CodexErrorDetails::Stream(..)
@@ -409,6 +412,7 @@ impl CodexErr {
             | CodexErrorDetails::ResponseStreamFailed(_)
             | CodexErrorDetails::ConnectionFailed(_)
             | CodexErrorDetails::InternalServerError
+            | CodexErrorDetails::ServerOverloaded
             | CodexErrorDetails::InternalAgentDied
             | CodexErrorDetails::Io(_)
             | CodexErrorDetails::Json(_)
