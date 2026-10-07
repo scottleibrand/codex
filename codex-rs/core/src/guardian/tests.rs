@@ -3162,6 +3162,8 @@ async fn guardian_review_surfaces_responses_api_errors_in_rejection_reason() -> 
             EventMsg::GuardianAssessment(event)
                 if event.status == GuardianAssessmentStatus::Denied =>
             {
+                assert_eq!(event.risk_level, None);
+                assert_eq!(event.user_authorization, None);
                 denial_rationales.push(event.rationale)
             }
             _ => {}
@@ -3189,6 +3191,7 @@ async fn guardian_review_surfaces_responses_api_errors_in_rejection_reason() -> 
     );
     assert!(
         rejection.starts_with("Automatic approval review failed:")
+            && rejection.contains("review unavailable; action not executed")
             && rejection.contains(error_message),
         "rejection message should include guardian rationale: {rejection}"
     );

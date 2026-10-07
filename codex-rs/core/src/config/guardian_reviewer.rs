@@ -213,11 +213,17 @@ mod tests {
         let openai = &providers[OPENAI_PROVIDER_ID];
         let bedrock = &providers[AMAZON_BEDROCK_PROVIDER_ID];
         assert!(is_trusted_reviewer_provider(OPENAI_PROVIDER_ID, openai));
-        assert!(is_trusted_reviewer_provider(AMAZON_BEDROCK_PROVIDER_ID, bedrock));
+        assert!(is_trusted_reviewer_provider(
+            AMAZON_BEDROCK_PROVIDER_ID,
+            bedrock
+        ));
         assert!(!is_trusted_reviewer_provider("custom", openai));
         let mut custom_auth = openai.clone();
         custom_auth.requires_openai_auth = false;
-        assert!(!is_trusted_reviewer_provider(OPENAI_PROVIDER_ID, &custom_auth));
+        assert!(!is_trusted_reviewer_provider(
+            OPENAI_PROVIDER_ID,
+            &custom_auth
+        ));
     }
 
     #[tokio::test]
@@ -233,6 +239,9 @@ mod tests {
         assert!(composed.contains("Additional local constraints"));
         assert!(composed.contains("cannot redefine"));
         config.guardian_policy_is_managed = true;
-        assert_eq!(config.resolve_guardian_policy(model_messages), "Additional local constraints");
+        assert_eq!(
+            config.resolve_guardian_policy(model_messages),
+            "Additional local constraints"
+        );
     }
 }

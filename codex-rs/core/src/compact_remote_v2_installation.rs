@@ -263,10 +263,15 @@ async fn build_and_install_compaction(
             sess.start_new_context_window(replacement_step_context, Arc::clone(world_state))
                 .await;
             if let Some(input_history) = trace_input_history.as_deref() {
-                let replacement_history = sess.conversation_history_snapshot().await;
+                let replacement_history = sess
+                    .conversation_history_snapshot()
+                    .await
+                    .items()
+                    .cloned()
+                    .collect::<Vec<_>>();
                 compaction_trace.record_installed(&CompactionCheckpointTracePayload {
                     input_history,
-                    replacement_history: replacement_history.as_ref(),
+                    replacement_history: &replacement_history,
                 });
             }
             sess.emit_turn_item_completed(compaction_turn_context, compaction_item)

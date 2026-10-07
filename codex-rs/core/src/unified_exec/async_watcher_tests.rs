@@ -367,10 +367,11 @@ async fn exit_watcher_bounds_interaction_lock_wait_after_exit() -> anyhow::Resul
         process,
         stdout_tx,
         exit_tx,
-        transcript,
+        output_buffer,
         context,
         rx_event,
     } = streaming_output_harness().await?;
+    start_streaming_output(&process, &context);
     let interaction_guard = process.interaction_lock().lock_owned().await;
 
     tokio::time::pause();
@@ -378,14 +379,12 @@ async fn exit_watcher_bounds_interaction_lock_wait_after_exit() -> anyhow::Resul
     let cwd = context.step_context.turn.cwd.clone().into();
     spawn_exit_watcher(
         Arc::clone(&process),
-        Arc::clone(&context.session),
-        Arc::clone(&context.step_context.turn),
-        context.call_id,
+        &context,
         vec!["proof".to_string()],
         cwd,
         /*process_id*/ 123,
         /*plugin_attribution*/ None,
-        transcript,
+        output_buffer,
         Instant::now(),
         /*network_denial_monitor*/ None,
         /*plugin_metrics_sidecar*/ None,

@@ -28,7 +28,9 @@ fn http_retry_delay(attempt: u64, fast_delay: Duration) -> Duration {
         return fast_delay;
     }
     Duration::from_secs(60).saturating_mul(
-        1_u32.checked_shl(attempt.saturating_sub(2).min(32) as u32).unwrap_or(u32::MAX),
+        1_u32
+            .checked_shl(attempt.saturating_sub(2).min(32) as u32)
+            .unwrap_or(u32::MAX),
     )
 }
 
@@ -108,7 +110,10 @@ pub(crate) async fn handle_response_stream_error(
         http_retry_delay(retry_count, delay)
     };
     let now = Instant::now();
-    let retry_at = retry_after.map(RetryAfter::deadline).unwrap_or(now).max(now + delay);
+    let retry_at = retry_after
+        .map(RetryAfter::deadline)
+        .unwrap_or(now)
+        .max(now + delay);
 
     if turn_context
         .config
@@ -172,7 +177,10 @@ pub(crate) async fn handle_response_stream_error(
             // happening instead of staring at a seemingly frozen screen.
             sess.notify_stream_error(
                 turn_context,
-                format!("Reconnecting... {retry_count}/{max_retries} (waiting {}s)", delay.as_secs()),
+                format!(
+                    "Reconnecting... {retry_count}/{max_retries} (waiting {}s)",
+                    delay.as_secs()
+                ),
                 err,
             )
             .await;

@@ -45,6 +45,7 @@ where
         deadline,
     } = limits;
     assert!(max_attempts > 0, "guardian review must run at least once");
+    let started_at = Instant::now();
     let mut attempt_count = 1;
     let mut context_changed = false;
     loop {
@@ -52,6 +53,19 @@ where
         analytics_result.attempt_count = attempt_count;
         context_changed |= analytics_result.context_changed;
         analytics_result.context_changed = context_changed;
+        let (outcome_kind, error_info) = outcome_diagnostic(&outcome);
+        tracing::info!(
+            attempt_count,
+            max_attempts,
+            outcome_kind,
+            ?error_info,
+            guardian_thread_id = analytics_result.guardian_thread_id.as_deref(),
+            guardian_model = analytics_result.guardian_model.as_deref(),
+            guardian_provider = analytics_result.guardian_model_provider_id.as_deref(),
+            elapsed_ms = millis(started_at.elapsed()),
+            remaining_ms = millis(deadline.saturating_duration_since(Instant::now())),
+            "guardian_review_attempt_finished"
+        );
         if attempt_count >= max_attempts || !should_retry_guardian_review(&outcome) {
             return (outcome, analytics_result, evidence);
         }
@@ -167,6 +181,28 @@ async fn wait_before_guardian_retry(
                 std::future::pending::<()>().await;
             }
         } => Some(GuardianReviewError::Cancelled),
+    }
+}
+
+fn millis(duration: Duration) -> u64 {
+    u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
+}
+
+fn outcome_diagnostic(outcome: &GuardianReviewOutcome) -> (&'static str, Option<&CodexErrorInfo>) {
+    match outcome {
+        GuardianReviewOutcome::CachedApproval => ("cached_approval", None),
+        GuardianReviewOutcome::Completed(_) => ("completed", None),
+        GuardianReviewOutcome::Error(error) => match error {
+            GuardianReviewError::Session { error_info, .. } => {
+                ("session_error", error_info.as_ref())
+            }
+            GuardianReviewError::InputBudgetExceeded => ("input_budget", None),
+            GuardianReviewError::PromptBuild { .. } => ("prompt_build", None),
+            GuardianReviewError::Parse { .. } => ("parse", None),
+            GuardianReviewError::Timeout => ("timeout", None),
+            GuardianReviewError::Cancelled => ("cancelled", None),
+            GuardianReviewError::StaleAuthorization => ("stale_authorization", None),
+        },
     }
 }
 

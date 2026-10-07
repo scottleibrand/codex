@@ -631,6 +631,7 @@ async fn guardian_review_session_config_resolves_policy_and_template(
 ) {
     let mut parent_config = crate::config::test_config().await;
     parent_config.guardian_policy_config = managed_policy.map(str::to_owned);
+    parent_config.guardian_policy_is_managed = managed_policy.is_some();
     parent_config.guardian_policy_template = configured_template.map(str::to_owned);
     let mut model = model_info_from_slug("active-model");
     model.model_messages = Some(ModelMessages {

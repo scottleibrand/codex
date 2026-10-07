@@ -92,7 +92,7 @@ pub(crate) async fn resolve_review_model(
 ) -> anyhow::Result<(
     codex_guardian_reviewer::ReviewModel,
     Arc<codex_protocol::openai_models::ModelInfo>,
-) > {
+)> {
     let turn = context.turn();
     let reviewer = crate::config::guardian_reviewer::resolve_guardian_reviewer(
         turn.config.as_ref(),
@@ -100,7 +100,8 @@ pub(crate) async fn resolve_review_model(
         Some(Arc::clone(&session.services.auth_manager)),
         &context.model_info,
         context.reasoning_effort.clone(),
-    ).await?;
+    )
+    .await?;
     let review_model = codex_guardian_reviewer::ReviewModel {
         model: reviewer.model,
         reasoning_effort: reviewer.reasoning_effort,

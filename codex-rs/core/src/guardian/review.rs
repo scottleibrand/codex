@@ -129,7 +129,8 @@ pub(super) async fn guardian_review_session_config(
         Some(Arc::clone(&session.services.auth_manager)),
         &context.model_info,
         context.reasoning_effort.clone(),
-    ).await?;
+    )
+    .await?;
     let guardian_model_info = Arc::new(reviewer.model_info);
     let review_model = codex_guardian_reviewer::ReviewModel {
         model: reviewer.model,

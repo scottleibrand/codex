@@ -109,9 +109,11 @@ impl ToolCallRuntime {
                 }
                 Err(FunctionCallError::Fatal(message)) => return Err(CodexErr::Fatal(message)),
                 Err(other) => {
-                    if matches!(&other, FunctionCallError::RespondToModel(message) if message.starts_with("failed to parse function arguments:")) {
+                    if matches!(&other, FunctionCallError::RespondToModel(message) if message.starts_with("failed to parse function arguments:"))
+                    {
                         let history = error_session.clone_history().await;
-                        let occurrences = identical_function_call_count(history.raw_items(), &error_call);
+                        let occurrences =
+                            identical_function_call_count(history.raw_items(), &error_call);
                         tracing::warn!(
                             tool_name = %error_call.tool_name,
                             call_id = %error_call.call_id,
@@ -551,7 +553,9 @@ mod tests {
         let call = ToolCall {
             tool_name: codex_tools::ToolName::plain("exec_command").with_default_namespace(),
             call_id: "current".to_string(),
-            payload: ToolPayload::Function { arguments: "{broken".to_string() },
+            payload: ToolPayload::Function {
+                arguments: "{broken".to_string(),
+            },
             encrypted_function_args: None,
         };
         let matching = ResponseItem::FunctionCall {
@@ -560,6 +564,8 @@ mod tests {
             name: "exec_command".to_string(),
             namespace: None,
             arguments: "{broken".to_string(),
+            encrypted_function_args: None,
+            internal_chat_message_metadata_passthrough: None,
         };
         let user = ResponseItem::Message {
             id: None,
@@ -572,7 +578,14 @@ mod tests {
         if let ResponseItem::FunctionCall { arguments, .. } = &mut different {
             *arguments = "different".to_string();
         }
-        let history = vec![matching.clone(), user, matching.clone(), different, matching.clone(), matching];
+        let history = vec![
+            matching.clone(),
+            user,
+            matching.clone(),
+            different,
+            matching.clone(),
+            matching,
+        ];
         assert_eq!(identical_function_call_count(history.iter(), &call), 3);
     }
 

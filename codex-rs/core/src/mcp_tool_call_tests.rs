@@ -3217,6 +3217,7 @@ async fn strict_auto_review_forces_guardian_for_mcp_policy_skip() {
         .expect("test setup should allow updating approval policy");
     let mut config = (*turn_context.config).clone();
     config.model_provider.base_url = Some(format!("{}/v1", server.uri()));
+    config.model_provider.supports_websockets = false;
     config.approvals_reviewer = ApprovalsReviewer::User;
     let config = Arc::new(config);
     let models_manager = models_manager_with_provider(

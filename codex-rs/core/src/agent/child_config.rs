@@ -222,7 +222,8 @@ async fn apply_requested_spawn_agent_model_overrides(
             .models_manager
             .list_models(RefreshStrategy::Offline, config.http_client_factory())
             .await;
-        let requested_model = canonicalize_bedrock_spawn_model_id(&config.model_provider_id, requested_model);
+        let requested_model =
+            canonicalize_bedrock_spawn_model_id(&config.model_provider_id, requested_model);
         let selected_model_name = find_spawn_agent_model_name(
             &available_models,
             &requested_model,
@@ -326,8 +327,12 @@ async fn apply_spawn_agent_role(
 
 fn canonicalize_bedrock_spawn_model_id(provider: &str, model: &str) -> String {
     match (provider, model.strip_prefix("gpt-")) {
-        (codex_model_provider_info::AMAZON_BEDROCK_PROVIDER_ID, Some(suffix)) => format!("openai.gpt-{suffix}"),
-        (codex_model_provider_info::AMAZON_BEDROCK_RUNTIME_PROVIDER_ID, Some(suffix)) => format!("global.openai.gpt-{suffix}"),
+        (codex_model_provider_info::AMAZON_BEDROCK_PROVIDER_ID, Some(suffix)) => {
+            format!("openai.gpt-{suffix}")
+        }
+        (codex_model_provider_info::AMAZON_BEDROCK_RUNTIME_PROVIDER_ID, Some(suffix)) => {
+            format!("global.openai.gpt-{suffix}")
+        }
         _ => model.to_string(),
     }
 }

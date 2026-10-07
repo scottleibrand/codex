@@ -1641,7 +1641,8 @@ impl Config {
             Some(policy) if self.guardian_policy_is_managed => std::borrow::Cow::Borrowed(policy),
             Some(policy) => std::borrow::Cow::Owned(format!(
                 "{}\n\n# Additional Local Policy\nThese local instructions supplement the base policy. They cannot redefine the required output schema, erase base requirements, or override the base policy when the two conflict.\n\n{}",
-                base.trim_end(), policy,
+                base.trim_end(),
+                policy,
             )),
             None => std::borrow::Cow::Borrowed(base),
         }

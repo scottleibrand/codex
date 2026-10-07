@@ -345,7 +345,8 @@ impl Classification {
                 .unwrap_or_else(ResolvedModelMessages::bundled);
             let policy = config.resolve_guardian_policy(model_messages);
             let extra_policy = config.guardian_extra_policy.as_deref().unwrap_or_default();
-            let instructions = guardian_config.render_classifier_instructions(policy.as_ref(), extra_policy);
+            let instructions =
+                guardian_config.render_classifier_instructions(policy.as_ref(), extra_policy);
             let mut sampling = LunaSamplingRequest {
                 cyber_access_program,
                 parent_response_id,

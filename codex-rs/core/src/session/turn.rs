@@ -994,7 +994,10 @@ pub(crate) async fn run_hooks_and_record_inputs(
 
 fn estimate_pending_turn_input(input: &[TurnInput]) -> i64 {
     serde_json::to_string(&turn_user_input(input))
-        .map(|input| i64::try_from(codex_utils_output_truncation::approx_token_count(&input)).unwrap_or(i64::MAX))
+        .map(|input| {
+            i64::try_from(codex_utils_output_truncation::approx_token_count(&input))
+                .unwrap_or(i64::MAX)
+        })
         .unwrap_or(i64::MAX)
 }
 
@@ -1395,8 +1398,14 @@ async fn run_pre_sampling_compact(
     cancellation_token: &CancellationToken,
     pending_input_tokens: i64,
 ) -> CodexResult<()> {
-    maybe_run_previous_model_inline_compact(sess, turn_context, client_session, cancellation_token, pending_input_tokens)
-        .await?;
+    maybe_run_previous_model_inline_compact(
+        sess,
+        turn_context,
+        client_session,
+        cancellation_token,
+        pending_input_tokens,
+    )
+    .await?;
     let token_status =
         super::context_window::context_window_token_status(sess.as_ref(), turn_context.as_ref())
             .await;
@@ -2748,6 +2757,10 @@ async fn try_run_sampling_request(
         turn_id = %turn_context.sub_id,
         model = %step_context.settings.model_info.slug,
         provider = %turn_context.provider.info().name,
+        reasoning_effort = ?effort,
+        configured_reasoning_summary = ?step_context.settings.reasoning_summary,
+        bedrock_summary_omitted = turn_context.provider.info().is_amazon_bedrock(),
+        catalog_responses_lite = step_context.settings.model_info.use_responses_lite,
         input_items = prompt.input.len(),
         setup_timeout_ms = u64::try_from(stream_setup_timeout.as_millis()).unwrap_or(u64::MAX),
         "starting response stream attempt"
@@ -2787,7 +2800,10 @@ async fn try_run_sampling_request(
     };
     let stream_idle_timeout = turn_context.provider.info().stream_idle_timeout();
     let mut progress_deadline = tokio::time::Instant::now() + stream_idle_timeout;
-    let sampling_deadline = turn_context.provider.info().sampling_timeout()
+    let sampling_deadline = turn_context
+        .provider
+        .info()
+        .sampling_timeout()
         .map(|timeout| tokio::time::Instant::now() + timeout);
     tracing::info!(
         thread_id = %sess.thread_id,
@@ -2848,7 +2864,8 @@ async fn try_run_sampling_request(
             .instrument(trace_span!(parent: &handle_responses, "receiving"))
             .or_cancel(&preempt)
             .or_cancel(&cancellation_token);
-        let deadline = sampling_deadline.map(|deadline| deadline.min(progress_deadline))
+        let deadline = sampling_deadline
+            .map(|deadline| deadline.min(progress_deadline))
             .unwrap_or(progress_deadline);
         let event = match tokio::time::timeout_at(deadline, event).await {
             Ok(event) => event,
@@ -2860,7 +2877,9 @@ async fn try_run_sampling_request(
                     sampling_deadline_expired = sampling_deadline.is_some_and(|deadline| deadline <= tokio::time::Instant::now()),
                     "response stream progress deadline expired"
                 );
-                break Err(CodexErr::Stream("response stream sampling or semantic progress deadline exceeded".into()));
+                break Err(CodexErr::Stream(
+                    "response stream sampling or semantic progress deadline exceeded".into(),
+                ));
             }
         };
         // Account for an already-received terminal error even if cancellation raced it.

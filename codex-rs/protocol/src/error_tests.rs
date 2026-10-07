@@ -13,7 +13,14 @@ use std::time::Duration;
 
 #[test]
 fn transient_http_failures_retry_but_authentication_and_payment_failures_do_not() {
-    for (status, retryable) in [(401, false), (402, false), (403, false), (408, true), (429, true), (503, true)] {
+    for (status, retryable) in [
+        (401, false),
+        (402, false),
+        (403, false),
+        (408, true),
+        (429, true),
+        (503, true),
+    ] {
         let error = CodexErr::UnexpectedStatus(UnexpectedResponseError {
             status: StatusCode::from_u16(status).unwrap(),
             body: String::new(),

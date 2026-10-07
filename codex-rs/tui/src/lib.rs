@@ -414,7 +414,9 @@ async fn init_state_db_for_app_server_target(
     app_server_target: &AppServerTarget,
 ) -> std::io::Result<Option<StateDbHandle>> {
     match app_server_target {
-        AppServerTarget::Embedded => finish_embedded_state_db_init(config, state_db::try_init(config).await),
+        AppServerTarget::Embedded => {
+            finish_embedded_state_db_init(config, state_db::try_init(config).await)
+        }
         AppServerTarget::LocalDaemon { .. } | AppServerTarget::Remote { .. } => {
             Ok(state_db::get_state_db(config).await)
         }
@@ -435,7 +437,10 @@ fn finish_embedded_state_db_init(
             }
             let database_path = codex_state::runtime_db_path_for_corruption_error(&err)
                 .unwrap_or_else(|| config.sqlite_config().state_db_path());
-            Err(std::io::Error::other(LocalStateDbStartupError::new(database_path, err)))
+            Err(std::io::Error::other(LocalStateDbStartupError::new(
+                database_path,
+                err,
+            )))
         }
     }
 }
@@ -4089,7 +4094,12 @@ requires_openai_auth = {requires_openai_auth}
     async fn embedded_state_db_lock_continues_without_sqlite() -> color_eyre::Result<()> {
         let temp_dir = TempDir::new()?;
         let config = build_config(&temp_dir).await?;
-        let state_db = finish_embedded_state_db_init(&config, Err(anyhow::anyhow!("database is locked: synthetic startup contention")))?;
+        let state_db = finish_embedded_state_db_init(
+            &config,
+            Err(anyhow::anyhow!(
+                "database is locked: synthetic startup contention"
+            )),
+        )?;
         assert!(state_db.is_none());
         Ok(())
     }

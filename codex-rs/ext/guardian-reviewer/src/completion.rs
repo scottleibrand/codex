@@ -143,7 +143,9 @@ pub fn complete_review(
                     };
                     analytics.decision = GuardianReviewDecision::Denied;
                     analytics.terminal_status = GuardianReviewTerminalStatus::FailedClosed;
-                    let rationale = format!("Automatic approval review failed: {message}");
+                    let rationale = format!(
+                        "Automatic approval review failed: review unavailable; action not executed. {message}"
+                    );
                     // Keep the existing blocked status for client compatibility.
                     event.status = GuardianAssessmentStatus::Denied;
                     event.rationale = Some(rationale.clone());

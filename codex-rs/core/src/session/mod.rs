@@ -826,7 +826,9 @@ impl Session {
         let mut multi_agent_version = config.multi_agent_version_override().or_else(|| {
             resolve_multi_agent_version(&conversation_history, inherited_multi_agent_version)
         });
-        if config.model_provider.is_amazon_bedrock() && multi_agent_version == Some(MultiAgentVersion::V2) {
+        if config.model_provider.is_amazon_bedrock()
+            && multi_agent_version == Some(MultiAgentVersion::V2)
+        {
             multi_agent_version = Some(MultiAgentVersion::V1);
         }
         let history_mode = conversation_history.get_history_mode(
@@ -1869,7 +1871,9 @@ impl Session {
             .map(|(item, metadata)| ResponseItemEnvelope { item, metadata })
             .collect();
         let context = crate::guardian::GuardianReviewContext::from(turn_context);
-        let reviewer_compaction_hash = match crate::guardian::resolve_review_model(self, &context).await {
+        let reviewer_compaction_hash = match crate::guardian::resolve_review_model(self, &context)
+            .await
+        {
             Ok((_, reviewer)) => reviewer.comp_hash.clone(),
             Err(error) => {
                 tracing::warn!(%error, "reviewer checkpoint compatibility could not be resolved");

@@ -8502,6 +8502,7 @@ async fn load_config_uses_auto_review_guardian_policy_config_and_template(
             ),
             experimental_conversation_history_prompt: None,
             conversation_history_max_output_tokens: None,
+            ..Default::default()
         }),
         ..Default::default()
     };
@@ -8563,6 +8564,7 @@ async fn requirements_guardian_policy_beats_auto_review() -> std::io::Result<()>
                 experimental_policy_template: None,
                 experimental_conversation_history_prompt: None,
                 conversation_history_max_output_tokens: None,
+                ..Default::default()
             }),
             ..Default::default()
         };
@@ -8604,6 +8606,7 @@ async fn load_config_ignores_empty_auto_review_guardian_policy_config() -> std::
             experimental_policy_template: None,
             experimental_conversation_history_prompt: Some(String::new()),
             conversation_history_max_output_tokens: None,
+            ..Default::default()
         }),
         ..Default::default()
     };

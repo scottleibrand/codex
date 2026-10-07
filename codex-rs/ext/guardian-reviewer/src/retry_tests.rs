@@ -37,6 +37,143 @@ fn guardian_review_error_reason_distinguishes_error_kinds() {
 }
 
 #[test]
+fn rate_limits_are_transient_but_auth_payment_and_quota_are_not() {
+    for (error_info, expected) in [
+        (CodexErrorInfo::RateLimitExceeded, true),
+        (CodexErrorInfo::Unauthorized, false),
+        (CodexErrorInfo::UsageLimitExceeded, false),
+        (CodexErrorInfo::SessionBudgetExceeded, false),
+        (CodexErrorInfo::Other, false),
+        (
+            CodexErrorInfo::ResponseTooManyFailedAttempts {
+                http_status_code: Some(429),
+            },
+            true,
+        ),
+        (
+            CodexErrorInfo::ResponseTooManyFailedAttempts {
+                http_status_code: Some(401),
+            },
+            false,
+        ),
+        (
+            CodexErrorInfo::ResponseStreamConnectionFailed {
+                http_status_code: Some(402),
+            },
+            false,
+        ),
+        (
+            CodexErrorInfo::HttpConnectionFailed {
+                http_status_code: Some(403),
+            },
+            false,
+        ),
+    ] {
+        let outcome = GuardianReviewOutcome::Error(GuardianReviewError::session_with_error_info(
+            anyhow::anyhow!("fixture service error"),
+            error_info,
+        ));
+        assert_eq!(should_retry_guardian_review(&outcome), expected);
+    }
+}
+
+#[tokio::test]
+async fn transient_rate_limit_retry_uses_only_final_attempt_evidence() {
+    let mut attempts = 0;
+    let (outcome, analytics, evidence) = run_with_retry(
+        GuardianReviewSessionLimits {
+            max_attempts: 3,
+            deadline: Instant::now() + Duration::from_secs(90),
+        },
+        None,
+        |_deadline| {
+            attempts += 1;
+            let attempt = attempts;
+            async move {
+                let outcome = if attempt == 1 {
+                    GuardianReviewOutcome::Error(GuardianReviewError::session_with_error_info(
+                        anyhow::anyhow!("temporary rate limit"),
+                        CodexErrorInfo::RateLimitExceeded,
+                    ))
+                } else {
+                    GuardianReviewOutcome::Completed(GuardianAssessment {
+                        risk_level: GuardianRiskLevel::Low,
+                        user_authorization: GuardianUserAuthorization::High,
+                        outcome: GuardianAssessmentOutcome::Allow,
+                        rationale: "fixture approval".to_string(),
+                    })
+                };
+                (
+                    outcome,
+                    GuardianReviewAnalyticsResult::without_session(),
+                    Some(attempt),
+                )
+            }
+        },
+    )
+    .await;
+    assert!(matches!(outcome, GuardianReviewOutcome::Completed(_)));
+    assert_eq!(
+        (attempts, analytics.attempt_count, evidence),
+        (2, 2, Some(2))
+    );
+}
+
+#[tokio::test]
+async fn transient_review_exhaustion_stops_after_three_total_attempts() {
+    let mut attempts = 0;
+    let (outcome, analytics, _) = run_with_retry(
+        GuardianReviewSessionLimits {
+            max_attempts: 3,
+            deadline: Instant::now() + Duration::from_secs(90),
+        },
+        None,
+        |_deadline| {
+            attempts += 1;
+            async {
+                (
+                    GuardianReviewOutcome::Error(GuardianReviewError::session_with_error_info(
+                        anyhow::anyhow!("temporary connection error"),
+                        CodexErrorInfo::ResponseStreamDisconnected {
+                            http_status_code: None,
+                        },
+                    )),
+                    GuardianReviewAnalyticsResult::without_session(),
+                    None::<()>,
+                )
+            }
+        },
+    )
+    .await;
+    assert!(matches!(
+        outcome,
+        GuardianReviewOutcome::Error(GuardianReviewError::Session { .. })
+    ));
+    assert_eq!((attempts, analytics.attempt_count), (3, 3));
+}
+
+#[tokio::test]
+async fn provider_retry_deadline_is_not_bypassed_or_extended() {
+    let not_before = Instant::now() + Duration::from_millis(400);
+    assert!(
+        wait_before_guardian_retry(
+            1,
+            Some(not_before),
+            Instant::now() + Duration::from_secs(2),
+            None
+        )
+        .await
+        .is_none()
+    );
+    assert!(Instant::now() >= not_before);
+    let deadline = Instant::now() + Duration::from_millis(20);
+    let result =
+        wait_before_guardian_retry(1, Some(deadline + Duration::from_secs(2)), deadline, None)
+            .await;
+    assert!(matches!(result, Some(GuardianReviewError::Timeout)));
+}
+
+#[test]
 fn guardian_review_retry_only_retries_recoverable_errors() {
     let assessment = GuardianAssessment {
         risk_level: GuardianRiskLevel::High,

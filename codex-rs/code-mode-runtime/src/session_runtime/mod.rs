@@ -276,7 +276,8 @@ impl<D: SessionRuntimeDelegate> CellHost for RuntimeCellHost<D> {
         let tool_namespace = invocation.name.namespace.clone();
         let tool_kind = invocation.kind;
         tracing::info!(cell_id = %self.cell_id, %runtime_tool_call_id, tool_name, tool_namespace, ?tool_kind, "code_mode_tool_started");
-        let result = self.delegate
+        let result = self
+            .delegate
             .invoke_tool(
                 NestedToolCall {
                     cell_id: self.cell_id.clone(),
@@ -330,7 +331,13 @@ impl<D: SessionRuntimeDelegate> CellHost for RuntimeCellHost<D> {
 
     async fn closed(&self) {
         tracing::info!(cell_id = %self.cell_id, "code_mode_cell_close_started");
-        let registry_removed = self.inner.cells.lock().await.remove(&self.cell_id).is_some();
+        let registry_removed = self
+            .inner
+            .cells
+            .lock()
+            .await
+            .remove(&self.cell_id)
+            .is_some();
         self.delegate.cell_closed(&self.cell_id);
         tracing::info!(cell_id = %self.cell_id, registry_removed, "code_mode_cell_closed");
     }

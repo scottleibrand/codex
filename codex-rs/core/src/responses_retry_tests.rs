@@ -1,7 +1,7 @@
 use super::ResponsesStreamRequest;
-use super::http_retry_delay;
 use super::ResponsesStreamRetryState;
 use super::handle_response_stream_error;
+use super::http_retry_delay;
 use super::log_retry;
 use crate::realtime_history::RealtimeHistoryState;
 use crate::session::step_context::StepContext;
@@ -55,9 +55,13 @@ async fn sampling_retry_logs_stream_error_context() {
 fn http_retry_schedule_preserves_finite_multi_hour_exponential_window() {
     let fast = Duration::from_millis(200);
     let expected = [0, 60, 120, 240, 480, 960, 1920, 3840, 7680, 15360];
-    let actual: Vec<_> = (1..=10).map(|attempt| http_retry_delay(attempt, fast).as_secs()).collect();
+    let actual: Vec<_> = (1..=10)
+        .map(|attempt| http_retry_delay(attempt, fast).as_secs())
+        .collect();
     assert_eq!(actual, expected);
-    let total: Duration = (1..=10).map(|attempt| http_retry_delay(attempt, fast)).sum();
+    let total: Duration = (1..=10)
+        .map(|attempt| http_retry_delay(attempt, fast))
+        .sum();
     assert!(total > Duration::from_secs(8 * 3600));
 }
 
