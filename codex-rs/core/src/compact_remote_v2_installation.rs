@@ -248,13 +248,17 @@ async fn build_and_install_compaction(
             compaction_metadata,
         )
         .await;
-        if insufficient_post_compaction_headroom(
-            estimated_tokens,
-            replacement_step_context
-                .settings
-                .model_info
-                .usable_context_window(),
-        ) {
+        // Guardian sessions enforce their complete review-context budget upstream; a
+        // fresh window here would discard healthy reviewer summaries.
+        if !crate::guardian::is_basic_session_source(&replacement_step_context.turn.session_source)
+            && insufficient_post_compaction_headroom(
+                estimated_tokens,
+                replacement_step_context
+                    .settings
+                    .model_info
+                    .usable_context_window(),
+            )
+        {
             tracing::warn!(
                 turn_id = %compaction_turn_context.sub_id,
                 estimated_tokens,
