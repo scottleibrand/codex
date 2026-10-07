@@ -25,6 +25,34 @@ fn parse_tool_input_schema_coerces_boolean_schemas() {
 }
 
 #[test]
+fn parse_tool_input_schema_preserves_numeric_and_string_bounds() {
+    let input = serde_json::json!({
+        "type": "object",
+        "properties": {
+            "count": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9_007_199_254_740_993_u64
+            },
+            "score": {"type": "number", "minimum": -1.5, "maximum": 3.25},
+            "query": {"type": "string", "maxLength": 1000}
+        },
+        "additionalProperties": false
+    });
+
+    for parse in [
+        parse_tool_input_schema,
+        parse_tool_input_schema_without_compaction,
+    ] {
+        let schema = parse(&input).expect("parse schema");
+        assert_eq!(
+            serde_json::to_value(schema).expect("serialize schema"),
+            input
+        );
+    }
+}
+
+#[test]
 fn parse_tool_input_schema_infers_object_shape_and_defaults_properties() {
     // Example schema shape:
     // {

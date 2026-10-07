@@ -942,6 +942,7 @@ impl ModelClient {
                 .or_else(|| model_info.default_reasoning_level.clone())
                 .map(|effort| model_info.resolve_reasoning_effort(effort)),
             summary: (model_info.supports_reasoning_summary_parameter
+                && !self.state.provider.info().is_amazon_bedrock()
                 && summary != ReasoningSummaryConfig::None)
                 .then_some(summary),
             // When Responses Lite is disabled, omit context so Responses uses the default,

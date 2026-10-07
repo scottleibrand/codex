@@ -19,7 +19,7 @@ pub(super) async fn run_compaction(
     step_context: &Arc<StepContext>,
     replacement_step_context: &Arc<StepContext>,
     mut client_session: Option<&mut ModelClientSession>,
-    world_state: &WorldState,
+    world_state: &Arc<WorldState>,
     compaction_metadata: CompactionTurnMetadata,
     analytics_details: &mut CompactionAnalyticsDetails,
     mut started_item: Option<&TurnItem>,
@@ -75,7 +75,7 @@ async fn build_and_install_compaction(
     step_context: &Arc<StepContext>,
     replacement_step_context: &Arc<StepContext>,
     mut client_session: Option<&mut ModelClientSession>,
-    world_state: &WorldState,
+    world_state: &Arc<WorldState>,
     compaction_metadata: CompactionTurnMetadata,
     analytics_details: &mut CompactionAnalyticsDetails,
     started_item: Option<&TurnItem>,
@@ -189,7 +189,7 @@ async fn build_and_install_compaction(
         sess.record_rollout_budget_usage(token_usage).await?;
         analytics_details.active_context_tokens_before = Some(token_usage.input_tokens);
     }
-    let (compacted_history, retained_images) = build_v2_compacted_history(
+    let (mut compacted_history, mut retained_images) = build_v2_compacted_history(
         prompt_input,
         prompt_input_metadata,
         compaction_output,
@@ -200,6 +200,13 @@ async fn build_and_install_compaction(
             RetainedImageBudget::Disabled
         },
     );
+    if compaction_turn_context.provider.info().is_amazon_bedrock() {
+        // Bedrock rejects replayed historical images; keep their surrounding text.
+        for envelope in &mut compacted_history {
+            omit_historical_input_images(std::slice::from_mut(&mut envelope.item));
+        }
+        retained_images = 0;
+    }
     let reviewer_compaction_hash = reviewer_compaction_hash(sess, turn_context).await;
     let installed = if let Some((prefix, model_info, cutoff_world_state)) = prefix {
         let (initial_context, world_state_baseline) = sess
@@ -234,6 +241,38 @@ async fn build_and_install_compaction(
             compacted_history,
         )
         .await;
+        let estimated_tokens = estimated_replacement_request_tokens(
+            sess,
+            replacement_step_context,
+            &new_history,
+            compaction_metadata,
+        )
+        .await;
+        if insufficient_post_compaction_headroom(
+            estimated_tokens,
+            replacement_step_context
+                .settings
+                .model_info
+                .usable_context_window(),
+        ) {
+            tracing::warn!(
+                turn_id = %compaction_turn_context.sub_id,
+                estimated_tokens,
+                "remote compaction left insufficient request headroom; starting a fresh context window"
+            );
+            sess.start_new_context_window(replacement_step_context, Arc::clone(world_state))
+                .await;
+            if let Some(input_history) = trace_input_history.as_deref() {
+                let replacement_history = sess.conversation_history_snapshot().await;
+                compaction_trace.record_installed(&CompactionCheckpointTracePayload {
+                    input_history,
+                    replacement_history: replacement_history.as_ref(),
+                });
+            }
+            sess.emit_turn_item_completed(compaction_turn_context, compaction_item)
+                .await;
+            return Ok(true);
+        }
         let (window_number, window_ids) = sess.advance_auto_compact_window().await;
         let installation = CompactedHistoryMetadata {
             input_goal_ids,
@@ -279,6 +318,38 @@ async fn build_and_install_compaction(
     sess.emit_turn_item_completed(compaction_turn_context, compaction_item)
         .await;
     Ok(true)
+}
+
+/// Estimates the next request after installing `new_history`: base instructions, visible
+/// tools, the turn-context reference item, pending user input, and a fixed envelope reserve.
+async fn estimated_replacement_request_tokens(
+    sess: &Session,
+    replacement_step_context: &StepContext,
+    new_history: &[ResponseItemEnvelope],
+    compaction_metadata: CompactionTurnMetadata,
+) -> i64 {
+    fn token_count(text: &str) -> i64 {
+        i64::try_from(approx_token_count(text)).unwrap_or(i64::MAX)
+    }
+    let base_instructions = sess.get_base_instructions().await;
+    let tool_tokens = serde_json::to_string(
+        replacement_step_context
+            .tool_router
+            .model_visible_specs()
+            .as_ref(),
+    )
+    .map_or(i64::MAX, |tools| token_count(&tools));
+    let reference_tokens =
+        serde_json::to_string(&replacement_step_context.to_turn_context_item())
+            .map_or(i64::MAX, |context| token_count(&context));
+    new_history
+        .iter()
+        .map(|envelope| estimate_item_token_count(&envelope.item))
+        .fold(token_count(&base_instructions.text), i64::saturating_add)
+        .saturating_add(tool_tokens)
+        .saturating_add(reference_tokens)
+        .saturating_add(8192)
+        .saturating_add(compaction_metadata.post_compaction_input_tokens())
 }
 
 async fn reviewer_compaction_hash(sess: &Session, turn_context: &TurnContext) -> Option<String> {

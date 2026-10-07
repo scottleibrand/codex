@@ -391,11 +391,15 @@ impl ConfigManager {
             AuthManager::shared_from_config(&bootstrap, /*enable_codex_api_key_env*/ false)
                 .await
                 .map_err(std::io::Error::other)?;
-        self.replace_cloud_config_bundle_loader(
-            auth,
-            bootstrap.chatgpt_base_url.clone(),
-            bootstrap.http_client_factory(),
-        );
+        // Amazon Bedrock sessions do not use ChatGPT cloud configuration; skip
+        // the bundle loader so startup does not depend on ChatGPT reachability.
+        if !bootstrap.model_provider.is_amazon_bedrock() {
+            self.replace_cloud_config_bundle_loader(
+                auth,
+                bootstrap.chatgpt_base_url.clone(),
+                bootstrap.http_client_factory(),
+            );
+        }
         let config = self.load_latest_config(cwd).await;
         Ok(CloudStartupConfig { bootstrap, config })
     }

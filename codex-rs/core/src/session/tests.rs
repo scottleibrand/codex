@@ -12073,6 +12073,7 @@ async fn remote_compaction_v2_retains_only_the_selected_step(first_attempt: Firs
         CompactionPhase::PreTurn,
         /*candidate*/ None,
         crate::compact_remote_v2::CompactionFallback::Foreground,
+        /*post_compaction_input_tokens*/ 0,
     )
     .await
     .expect("compaction succeeds");

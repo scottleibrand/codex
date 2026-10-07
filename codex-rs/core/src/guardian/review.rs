@@ -123,8 +123,22 @@ pub(super) async fn guardian_review_session_config(
         Some(network_proxy) => Some(network_proxy.proxy().current_cfg().await?),
         None => None,
     };
-    let (review_model, guardian_model_info) =
-        super::reviewer_config::resolve_review_model(session, context).await;
+    let reviewer = crate::config::guardian_reviewer::resolve_guardian_reviewer(
+        turn.config.as_ref(),
+        session.services.models_manager.as_ref(),
+        Some(Arc::clone(&session.services.auth_manager)),
+        &context.model_info,
+        context.reasoning_effort.clone(),
+    ).await?;
+    let guardian_model_info = Arc::new(reviewer.model_info);
+    let review_model = codex_guardian_reviewer::ReviewModel {
+        model: reviewer.model,
+        reasoning_effort: reviewer.reasoning_effort,
+        default_review_model_id: reviewer.default_model_id,
+        catalog_contains_auto_review: reviewer.catalog_contains_default,
+        model_overridden: reviewer.model_overridden,
+        model_override: reviewer.model_override,
+    };
     let reviewer_config = session
         .services
         .thread_extension_data
@@ -150,6 +164,12 @@ pub(super) async fn guardian_review_session_config(
                 )
             })?;
     }
+    spawn_config.model_provider_id = reviewer.provider_id;
+    let request_max_retries = spawn_config.model_provider.request_max_retries;
+    let stream_max_retries = spawn_config.model_provider.stream_max_retries;
+    spawn_config.model_provider = reviewer.provider;
+    spawn_config.model_provider.request_max_retries = request_max_retries;
+    spawn_config.model_provider.stream_max_retries = stream_max_retries;
     if review_model.model != context.model_info.slug {
         spawn_config.model_context_window = None;
         spawn_config.model_auto_compact_token_limit = None;

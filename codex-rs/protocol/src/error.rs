@@ -408,6 +408,9 @@ impl CodexErr {
     /// The first retry is attempt one. Retryable errors use server advice when available and
     /// otherwise use exponential backoff with jitter. Callers enforce their own retry budgets.
     pub fn retry_delay(&self, retry_count: u64) -> Option<Duration> {
+        if self.http_status_code_value().is_some_and(|status| !matches!(status, 408 | 429 | 500..=599)) {
+            return None;
+        }
         match self.details() {
             CodexErrorDetails::TurnAborted
             | CodexErrorDetails::SessionBudgetExceeded

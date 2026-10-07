@@ -17,12 +17,17 @@ impl ExecPolicyManager {
         mut request: ExecApprovalRequest<'_>,
         configured_shell: &Shell,
         command_platform: DangerousCommandPlatform,
+        cwd: Option<&Path>,
     ) -> ExecApprovalRequirement {
         let command = request.command;
         let executable = shell_approval_command(command, configured_shell);
         if executable.len() == command.len() {
             return self
-                .create_exec_approval_requirement_for_command_platform(request, command_platform)
+                .create_exec_approval_requirement_for_parsed_commands(
+                    request,
+                    commands_for_exec_policy_for_platform(command, command_platform, cwd),
+                    command_platform,
+                )
                 .await;
         }
 
@@ -40,10 +45,10 @@ impl ExecPolicyManager {
                         command_origin,
                     }
                 }
-                None => commands_for_exec_policy_for_platform(command, command_platform),
+                None => commands_for_exec_policy_for_platform(command, command_platform, cwd),
             }
         } else {
-            commands_for_exec_policy_for_platform(command, command_platform)
+            commands_for_exec_policy_for_platform(command, command_platform, cwd)
         };
 
         // Evaluate the executable alongside its apparent commands. Inner

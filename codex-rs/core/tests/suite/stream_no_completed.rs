@@ -24,6 +24,69 @@ fn sse_incomplete() -> String {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn response_setup_timeout_retries_without_losing_the_turn() -> anyhow::Result<()> {
+    skip_if_no_network!(Ok(()));
+    let server = MockServer::start().await;
+    let attempts = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let observed = attempts.clone();
+    wiremock::Mock::given(wiremock::matchers::method("POST"))
+        .and(wiremock::matchers::path("/v1/responses"))
+        .respond_with(move |_request: &wiremock::Request| {
+            let template = wiremock::ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string(responses::sse_completed("setup-recovered"));
+            if observed.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0 {
+                template.set_delay(std::time::Duration::from_secs(2))
+            } else {
+                template
+            }
+        })
+        .mount(&server)
+        .await;
+    let test = test_codex().with_config(|config| {
+        config.model_provider.request_max_retries = Some(0);
+        config.model_provider.stream_max_retries = Some(1);
+        config.model_provider.stream_setup_timeout_ms = Some(500);
+    }).build(&server).await?;
+    test.codex.start_or_steer_turn(TurnInputRequest::user_input(vec![UserInput::Text {
+        text: "hello".into(), text_elements: Vec::new(),
+    }])).await?;
+    let completion = wait_for_event(&test.codex, |event| matches!(event, EventMsg::TurnComplete(_))).await;
+    let EventMsg::TurnComplete(completion) = completion else { unreachable!() };
+    assert_eq!(completion.error, None);
+    assert_eq!(attempts.load(std::sync::atomic::Ordering::SeqCst), 2);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn sampling_deadline_retries_an_open_stream_before_its_idle_timeout() -> anyhow::Result<()> {
+    skip_if_no_network!(Ok(()));
+    let (_hold, gate) = tokio::sync::oneshot::channel();
+    let (server, _) = start_streaming_sse_server(vec![
+        vec![
+            StreamingSseChunk { gate: None, body: responses::sse(vec![responses::ev_response_created("open-stream")]) },
+            StreamingSseChunk { gate: Some(gate), body: responses::sse_completed("too-late") },
+        ],
+        vec![StreamingSseChunk { gate: None, body: responses::sse_completed("sampling-recovered") }],
+    ]).await;
+    let test = test_codex().with_config(|config| {
+        config.model_provider.request_max_retries = Some(0);
+        config.model_provider.stream_max_retries = Some(1);
+        config.model_provider.stream_idle_timeout_ms = Some(5_000);
+        config.model_provider.sampling_timeout_ms = Some(150);
+    }).build_with_streaming_server(&server).await?;
+    test.codex.start_or_steer_turn(TurnInputRequest::user_input(vec![UserInput::Text {
+        text: "hello".into(), text_elements: Vec::new(),
+    }])).await?;
+    let completion = wait_for_event(&test.codex, |event| matches!(event, EventMsg::TurnComplete(_))).await;
+    let EventMsg::TurnComplete(completion) = completion else { unreachable!() };
+    assert_eq!(completion.error, None);
+    assert_eq!(server.requests().await.len(), 2);
+    server.shutdown().await;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn retries_on_early_close() {
     skip_if_no_network!();
 
@@ -65,7 +128,9 @@ async fn retries_on_early_close() {
         // exercise retry path: first attempt yields incomplete stream, so allow 1 retry
         request_max_retries: Some(0),
         stream_max_retries: Some(1),
-        stream_idle_timeout_ms: Some(2000),
+       stream_idle_timeout_ms: Some(2000),
+        stream_setup_timeout_ms: None,
+        sampling_timeout_ms: None,
         websocket_connect_timeout_ms: None,
         requires_openai_auth: false,
         supports_websockets: false,
@@ -116,6 +181,7 @@ async fn connection_failure_pauses_retry_budget_until_provider_is_reachable() ->
     let TestCodex { codex, .. } = test_codex()
         .with_config(move |config| {
             config.model_provider.base_url = Some(format!("http://{unavailable_address}/v1"));
+            config.features.enable(codex_features::Feature::UnboundedConnectionRetries).unwrap();
             config.model_provider.request_max_retries = Some(0);
             config.model_provider.stream_max_retries = Some(1);
             config.model_provider.supports_websockets = false;
@@ -155,7 +221,7 @@ async fn connection_failure_pauses_retry_budget_until_provider_is_reachable() ->
     else {
         unreachable!("predicate guarantees a stream error event");
     };
-    assert_eq!(stream_error.message, "Reconnecting... 1/1");
+    assert_eq!(stream_error.message, "Reconnecting... 1/1 (waiting 0s)");
 
     let EventMsg::TurnComplete(completed) =
         wait_for_event(&codex, |event| matches!(event, EventMsg::TurnComplete(_))).await

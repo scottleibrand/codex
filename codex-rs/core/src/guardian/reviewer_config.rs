@@ -40,7 +40,7 @@ pub fn build_guardian_review_session_config(
         .unwrap_or(auto_review.policy_template);
     let mut instructions = GuardianPolicyInstructions::new(
         guardian_config.guardian_transcript_mode,
-        tenant_policy_config,
+        tenant_policy_config.as_ref(),
         extra_policy,
         policy_template,
         guardian_output_contract_prompt(),
@@ -89,42 +89,25 @@ pub fn build_guardian_review_session_config(
 pub(crate) async fn resolve_review_model(
     session: &crate::session::session::Session,
     context: &super::GuardianReviewContext,
-) -> (
+) -> anyhow::Result<(
     codex_guardian_reviewer::ReviewModel,
     Arc<codex_protocol::openai_models::ModelInfo>,
-) {
+) > {
     let turn = context.turn();
-    let available_models = session
-        .services
-        .models_manager
-        .list_models(
-            codex_models_manager::manager::RefreshStrategy::Offline,
-            turn.config.http_client_factory(),
-        )
-        .await;
-    let default_review_model_id = turn.provider.approval_review_preferred_model();
-    let review_model = codex_guardian_reviewer::select_review_model(
+    let reviewer = crate::config::guardian_reviewer::resolve_guardian_reviewer(
+        turn.config.as_ref(),
+        session.services.models_manager.as_ref(),
+        Some(Arc::clone(&session.services.auth_manager)),
         &context.model_info,
-        context.reasoning_effort.as_ref(),
-        default_review_model_id,
-        &available_models,
-    );
-    // Resolve a separate reviewer against the current catalog on every attempt.
-    // Parent fallback must retain the action's metadata even after a catalog refresh.
-    let guardian_model_info =
-        if !review_model.catalog_contains_auto_review && !review_model.model_overridden {
-            Arc::clone(&context.model_info)
-        } else {
-            Arc::new(
-                session
-                    .services
-                    .models_manager
-                    .get_model_info(
-                        review_model.model.as_str(),
-                        &turn.config.to_models_manager_config(),
-                    )
-                    .await,
-            )
-        };
-    (review_model, guardian_model_info)
+        context.reasoning_effort.clone(),
+    ).await?;
+    let review_model = codex_guardian_reviewer::ReviewModel {
+        model: reviewer.model,
+        reasoning_effort: reviewer.reasoning_effort,
+        default_review_model_id: reviewer.default_model_id,
+        catalog_contains_auto_review: reviewer.catalog_contains_default,
+        model_overridden: reviewer.model_overridden,
+        model_override: reviewer.model_override,
+    };
+    Ok((review_model, Arc::new(reviewer.model_info)))
 }

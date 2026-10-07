@@ -53,6 +53,12 @@ pub struct JsonSchema {
     #[serde(rename = "enum", skip_serializing_if = "Option::is_none")]
     pub enum_values: Option<Box<[JsonValue]>>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub minimum: Option<serde_json::Number>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub maximum: Option<serde_json::Number>,
+    #[serde(rename = "maxLength", skip_serializing_if = "Option::is_none")]
+    pub max_length: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub items: Option<Box<JsonSchema>>,
     #[serde(rename = "minItems", skip_serializing_if = "Option::is_none")]
     pub min_items: Option<usize>,

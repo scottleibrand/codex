@@ -168,6 +168,14 @@ pub(super) async fn run_remote_compact_v2_attempt(
         && input
             .iter()
             .any(|item| matches!(item, ResponseItem::AdditionalTools { .. }));
+    // Bedrock rejects images that precede an earlier compaction; keep current-window images.
+    if turn_context.provider.info().is_amazon_bedrock()
+        && let Some(last_compaction) = input
+            .iter()
+            .rposition(|item| matches!(item, ResponseItem::Compaction { .. }))
+    {
+        super::omit_historical_input_images(&mut input[..last_compaction]);
+    }
     let tool_router = &step_context.tool_router;
     input.push(ResponseItem::CompactionTrigger {});
     let prompt = Prompt {

@@ -577,6 +577,9 @@ pub enum ThreadStoreToml {
 
 #[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq, Eq, JsonSchema)]
 pub struct AutoReviewToml {
+    pub model_provider: Option<String>,
+    pub model: Option<String>,
+    pub reasoning_effort: Option<ReasoningEffort>,
     /// Controls whether circuit-breaker interruptions include a structured error.
     /// Strict mode writes structured errors that older clients may not
     /// recognize when reading shared history. Defaults to `default`.

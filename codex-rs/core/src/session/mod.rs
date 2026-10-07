@@ -823,9 +823,12 @@ impl Session {
             token_budget::apply_model_defaults(Arc::make_mut(&mut config), &model_info);
         }
         let configured_config = Arc::clone(&config);
-        let multi_agent_version = config.multi_agent_version_override().or_else(|| {
+        let mut multi_agent_version = config.multi_agent_version_override().or_else(|| {
             resolve_multi_agent_version(&conversation_history, inherited_multi_agent_version)
         });
+        if config.model_provider.is_amazon_bedrock() && multi_agent_version == Some(MultiAgentVersion::V2) {
+            multi_agent_version = Some(MultiAgentVersion::V1);
+        }
         let history_mode = conversation_history.get_history_mode(
             requested_history_mode.unwrap_or_else(|| thread_store.default_history_mode()),
         );
@@ -1866,8 +1869,13 @@ impl Session {
             .map(|(item, metadata)| ResponseItemEnvelope { item, metadata })
             .collect();
         let context = crate::guardian::GuardianReviewContext::from(turn_context);
-        let (_, reviewer) = crate::guardian::resolve_review_model(self, &context).await;
-        let reviewer_compaction_hash = reviewer.comp_hash.clone();
+        let reviewer_compaction_hash = match crate::guardian::resolve_review_model(self, &context).await {
+            Ok((_, reviewer)) => reviewer.comp_hash.clone(),
+            Err(error) => {
+                tracing::warn!(%error, "reviewer checkpoint compatibility could not be resolved");
+                None
+            }
+        };
         {
             let mut state = self.state.lock().await;
             state.replace_annotated_history(

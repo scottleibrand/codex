@@ -2,9 +2,9 @@ use super::*;
 use pretty_assertions::assert_eq;
 
 #[test]
-fn parse_guardian_assessment_extracts_embedded_json() {
+fn parse_guardian_assessment_accepts_complete_json() {
     let parsed = parse_guardian_assessment(
-        "preface {\"risk_level\":\"medium\",\"user_authorization\":\"low\",\"outcome\":\"allow\",\"rationale\":\"ok\"}",
+        "{\"risk_level\":\"medium\",\"user_authorization\":\"low\",\"outcome\":\"allow\",\"rationale\":\"ok\"}",
     )
     .expect("guardian assessment");
 
@@ -32,6 +32,19 @@ fn parse_guardian_assessment_treats_bare_allow_as_low_risk() {
             rationale: "Auto-review returned a low-risk allow decision.".to_string(),
         }
     );
+}
+
+#[test]
+fn parse_guardian_assessment_rejects_ambiguous_or_wrapped_output() {
+    for payload in [
+        "preface {\"outcome\":\"allow\"}",
+        "{\"outcome\":\"allow\"} trailing",
+        "{\"outcome\":\"allow\",\"outcome\":\"deny\"}",
+        "{\"outcome\":\"allow\",\"unrecognized\":true}",
+        "[{\"outcome\":\"allow\"}]",
+    ] {
+        assert!(parse_guardian_assessment(payload).is_err(), "{payload}");
+    }
 }
 
 #[test]

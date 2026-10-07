@@ -190,6 +190,8 @@ fn model_provider_from_proto(
         request_max_retries: provider.request_max_retries,
         stream_max_retries: provider.stream_max_retries,
         stream_idle_timeout_ms: provider.stream_idle_timeout_ms,
+        stream_setup_timeout_ms: provider.stream_setup_timeout_ms,
+        sampling_timeout_ms: provider.sampling_timeout_ms,
         websocket_connect_timeout_ms: provider.websocket_connect_timeout_ms,
         requires_openai_auth: provider.requires_openai_auth,
         supports_websockets: provider.supports_websockets,
@@ -228,6 +230,8 @@ fn model_provider_to_proto(
         supports_standalone_web_search,
         include_internal_metadata: _,
         capabilities: _,
+        stream_setup_timeout_ms,
+        sampling_timeout_ms,
     } = provider;
 
     proto::ModelProvider {
@@ -250,6 +254,8 @@ fn model_provider_to_proto(
         requires_openai_auth,
         supports_websockets,
         supports_standalone_web_search,
+        stream_setup_timeout_ms,
+        sampling_timeout_ms,
     }
 }
 
@@ -514,7 +520,9 @@ mod tests {
                             }),
                             request_max_retries: Some(7),
                             stream_max_retries: Some(8),
-                            stream_idle_timeout_ms: Some(9_000),
+           stream_idle_timeout_ms: Some(9_000),
+            stream_setup_timeout_ms: Some(2_000),
+            sampling_timeout_ms: Some(25_000),
                             websocket_connect_timeout_ms: Some(10_000),
                             requires_openai_auth: false,
                             supports_websockets: true,
@@ -577,6 +585,8 @@ mod tests {
             request_max_retries: Some(7),
             stream_max_retries: Some(8),
             stream_idle_timeout_ms: Some(9_000),
+            stream_setup_timeout_ms: Some(2_000),
+            sampling_timeout_ms: Some(25_000),
             websocket_connect_timeout_ms: Some(10_000),
             requires_openai_auth: false,
             supports_websockets: true,

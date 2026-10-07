@@ -119,13 +119,14 @@ pub(crate) async fn run_inline_remote_auto_compact_task(
     phase: CompactionPhase,
     candidate: Option<Box<BackgroundCompactionCandidate>>,
     fallback: CompactionFallback,
+    post_compaction_input_tokens: i64,
 ) -> CodexResult<bool> {
     let compaction_metadata = CompactionTurnMetadata::new(
         CompactionTrigger::Auto,
         reason,
         CompactionImplementation::ResponsesCompactionV2,
         phase,
-    );
+    ).with_post_compaction_input_tokens(post_compaction_input_tokens);
     run_remote_compact_task_inner(
         &sess,
         &step_context,
@@ -273,6 +274,25 @@ async fn run_remote_compact_task_inner(
                 sess.send_event(turn_context, event).await;
             }
             Err(err)
+        }
+    }
+}
+
+/// Whether an installed replacement history would leave too little room for the next request.
+fn insufficient_post_compaction_headroom(estimated_tokens: i64, context_window: Option<i64>) -> bool {
+    context_window.is_some_and(|window| estimated_tokens > window.saturating_sub((window / 4).clamp(1, 64_000)))
+}
+
+pub(crate) fn omit_historical_input_images(items: &mut [ResponseItem]) {
+    for item in items {
+        if let ResponseItem::Message { content, .. } = item {
+            for content_item in content {
+                if matches!(content_item, ContentItem::InputImage { .. }) {
+                    *content_item = ContentItem::InputText {
+                        text: "[Image omitted after compaction]".to_string(),
+                    };
+                }
+            }
         }
     }
 }
@@ -779,6 +799,33 @@ mod tests {
     use pretty_assertions::assert_eq;
     use tokio::sync::mpsc;
     use tokio_util::sync::CancellationToken;
+
+    #[test]
+    fn post_compaction_guard_reserves_headroom_without_inventing_unknown_limits() {
+        assert!(!insufficient_post_compaction_headroom(192_000, Some(256_000)));
+        assert!(insufficient_post_compaction_headroom(192_001, Some(256_000)));
+        assert!(!insufficient_post_compaction_headroom(75_000, Some(100_000)));
+        assert!(insufficient_post_compaction_headroom(75_001, Some(100_000)));
+        assert!(!insufficient_post_compaction_headroom(i64::MAX, None));
+    }
+
+    #[test]
+    fn bedrock_historical_image_omission_preserves_text_and_other_items() {
+        let mut history = vec![message("user", "preserved", None)];
+        let ResponseItem::Message { content, .. } = &mut history[0] else {
+            panic!("expected message");
+        };
+        content.push(ContentItem::InputImage {
+            image: codex_protocol::models::ImageReference::Inline { image_url: "data:image/png;base64,test".to_string() },
+            detail: None,
+        });
+        omit_historical_input_images(&mut history);
+        let ResponseItem::Message { content, .. } = &history[0] else {
+            panic!("expected message");
+        };
+        assert_eq!(content[0], ContentItem::InputText { text: "preserved".to_string() });
+        assert!(matches!(&content[1], ContentItem::InputText { text } if text.contains("Image omitted")));
+    }
 
     fn message(role: &str, text: &str, phase: Option<MessagePhase>) -> ResponseItem {
         ResponseItem::Message {

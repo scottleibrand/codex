@@ -11,6 +11,23 @@ use http::StatusCode;
 use pretty_assertions::assert_eq;
 use std::time::Duration;
 
+#[test]
+fn transient_http_failures_retry_but_authentication_and_payment_failures_do_not() {
+    for (status, retryable) in [(401, false), (402, false), (403, false), (408, true), (429, true), (503, true)] {
+        let error = CodexErr::UnexpectedStatus(UnexpectedResponseError {
+            status: StatusCode::from_u16(status).unwrap(),
+            body: String::new(),
+            user_message: None,
+            url: None,
+            cf_ray: None,
+            request_id: None,
+            identity_authorization_error: None,
+            identity_error_code: None,
+        });
+        assert_eq!(error.retry_delay(1).is_some(), retryable, "{status}");
+    }
+}
+
 #[tokio::test(start_paused = true)]
 async fn codex_err_debug_preserves_legacy_shape() {
     let actual = [

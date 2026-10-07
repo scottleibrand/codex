@@ -7,6 +7,14 @@ use pretty_assertions::assert_eq;
 use std::sync::Arc;
 use tracing_subscriber::prelude::*;
 
+#[test]
+fn stream_metadata_and_empty_deltas_do_not_extend_progress_deadlines() {
+    assert!(!response_event_has_progress(&ResponseEvent::Created { response_id: None }));
+    assert!(!response_event_has_progress(&ResponseEvent::ServerModel("model".to_string())));
+    assert!(!response_event_has_progress(&ResponseEvent::OutputTextDelta(String::new())));
+    assert!(response_event_has_progress(&ResponseEvent::OutputTextDelta("progress".to_string())));
+}
+
 struct RewriteAgentMessageContributor;
 
 impl TurnItemContributor for RewriteAgentMessageContributor {

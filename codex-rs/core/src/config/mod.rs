@@ -163,6 +163,7 @@ use toml_edit::DocumentMut;
 
 mod auth_keyring;
 pub mod edit;
+pub mod guardian_reviewer;
 mod managed_features;
 mod metrics;
 mod network_config;
@@ -717,10 +718,12 @@ pub struct Config {
     /// `# Policy Configuration` section rather than replacing the whole
     /// guardian developer prompt.
     pub guardian_policy_config: Option<String>,
+    pub guardian_policy_is_managed: bool,
 
     /// Additional Guardian policy from requirements.toml or config.toml.
     /// Rendered into `{{ extra_policy }}` alongside the resolved tenant policy.
     pub guardian_extra_policy: Option<String>,
+    pub auto_review: Option<codex_config::config_toml::AutoReviewToml>,
 
     /// Guardian prompt template override from config.toml.
     /// The resolved policy config replaces its `{{ tenant_policy_config }}`
@@ -1632,10 +1635,16 @@ impl Config {
     pub fn resolve_guardian_policy<'a>(
         &'a self,
         model_messages: ResolvedModelMessages<'a>,
-    ) -> &'a str {
-        self.guardian_policy_config
-            .as_deref()
-            .unwrap_or(model_messages.auto_review().policy)
+    ) -> std::borrow::Cow<'a, str> {
+        let base = model_messages.auto_review().policy;
+        match self.guardian_policy_config.as_deref() {
+            Some(policy) if self.guardian_policy_is_managed => std::borrow::Cow::Borrowed(policy),
+            Some(policy) => std::borrow::Cow::Owned(format!(
+                "{}\n\n# Additional Local Policy\nThese local instructions supplement the base policy. They cannot redefine the required output schema, erase base requirements, or override the base policy when the two conflict.\n\n{}",
+                base.trim_end(), policy,
+            )),
+            None => std::borrow::Cow::Borrowed(base),
+        }
     }
 
     pub(crate) fn multi_agent_version_override(&self) -> Option<MultiAgentVersion> {
@@ -4161,6 +4170,12 @@ impl Config {
             .and_then(|skills| skills.max_context_tokens);
         let include_environment_context = cfg.include_environment_context.unwrap_or(true);
         let include_environment_context_time = cfg.include_environment_context_time.unwrap_or(true);
+        let guardian_policy_is_managed = guardian_policy_config_from_requirements(config_layer_stack.requirements_toml()).is_some();
+        if let Some(policy) = cfg.auto_review.as_ref().and_then(|reviewer| reviewer.policy.as_deref())
+            && codex_utils_string::approx_token_count(policy) > 10_000
+        {
+            return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, "local Guardian policy exceeds the 10000-token budget"));
+        }
         let guardian_policy_config =
             guardian_policy_config_from_requirements(config_layer_stack.requirements_toml())
                 .or_else(|| {
@@ -4558,7 +4573,9 @@ impl Config {
                 .or(show_raw_agent_reasoning)
                 .unwrap_or(false),
             guardian_policy_config,
+            guardian_policy_is_managed,
             guardian_extra_policy,
+            auto_review: cfg.auto_review.clone(),
             guardian_policy_template,
             guardian_transcript_mode,
             guardian_conversation_history_prompt,

@@ -1,4 +1,5 @@
 use super::ResponsesStreamRequest;
+use super::http_retry_delay;
 use super::ResponsesStreamRetryState;
 use super::handle_response_stream_error;
 use super::log_retry;
@@ -50,6 +51,16 @@ async fn sampling_retry_logs_stream_error_context() {
     ));
 }
 
+#[test]
+fn http_retry_schedule_preserves_finite_multi_hour_exponential_window() {
+    let fast = Duration::from_millis(200);
+    let expected = [0, 60, 120, 240, 480, 960, 1920, 3840, 7680, 15360];
+    let actual: Vec<_> = (1..=10).map(|attempt| http_retry_delay(attempt, fast).as_secs()).collect();
+    assert_eq!(actual, expected);
+    let total: Duration = (1..=10).map(|attempt| http_retry_delay(attempt, fast)).sum();
+    assert!(total > Duration::from_secs(8 * 3600));
+}
+
 /// Time spent reporting a retry must count toward the server's original deadline.
 #[tokio::test]
 #[expect(
@@ -61,9 +72,9 @@ async fn stream_retry_preserves_deadline_across_delayed_notification() {
     let step_context = StepContext::for_test(Arc::new(turn_context));
     session.realtime_history = Some(Mutex::new(RealtimeHistoryState::default()));
     let mut client_session = session.services.model_client.new_session();
-    // The second retry emits a notification even when release builds hide the first.
+    // HTTP retries emit a notification on the first attempt.
     let mut retry_state = ResponsesStreamRetryState {
-        retries: 1,
+        retries: 0,
         ..Default::default()
     };
 

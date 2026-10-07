@@ -6,6 +6,20 @@ use std::num::NonZeroU64;
 use tempfile::tempdir;
 
 #[test]
+fn bounded_retry_and_sampling_defaults_remain_owner_configurable() {
+    let providers = built_in_model_providers(None);
+    let mut bedrock = providers[AMAZON_BEDROCK_PROVIDER_ID].clone();
+    assert_eq!(bedrock.stream_max_retries(), 10);
+    assert_eq!(bedrock.stream_setup_timeout(), Duration::from_secs(60));
+    assert_eq!(bedrock.sampling_timeout(), Some(Duration::from_secs(300)));
+    assert_eq!(providers[OPENAI_PROVIDER_ID].sampling_timeout(), None);
+    bedrock.stream_max_retries = Some(2);
+    assert_eq!(bedrock.stream_max_retries(), 2);
+    bedrock.sampling_timeout_ms = Some(0);
+    assert_eq!(bedrock.sampling_timeout(), None);
+}
+
+#[test]
 fn runtime_internal_metadata_opt_in_is_not_serialized_or_configurable() {
     let trusted = ModelProviderInfo {
         include_internal_metadata: true,
@@ -91,7 +105,9 @@ base_url = "http://localhost:11434/v1"
         env_http_headers: None,
         request_max_retries: None,
         stream_max_retries: None,
-        stream_idle_timeout_ms: None,
+       stream_idle_timeout_ms: None,
+        stream_setup_timeout_ms: None,
+        sampling_timeout_ms: None,
         websocket_connect_timeout_ms: None,
         requires_openai_auth: false,
         supports_websockets: false,
@@ -130,7 +146,9 @@ query_params = { api-version = "2025-04-01-preview" }
         env_http_headers: None,
         request_max_retries: None,
         stream_max_retries: None,
-        stream_idle_timeout_ms: None,
+       stream_idle_timeout_ms: None,
+        stream_setup_timeout_ms: None,
+        sampling_timeout_ms: None,
         websocket_connect_timeout_ms: None,
         requires_openai_auth: false,
         supports_websockets: false,
@@ -173,7 +191,9 @@ supports_standalone_web_search = true
         }),
         request_max_retries: None,
         stream_max_retries: None,
-        stream_idle_timeout_ms: None,
+       stream_idle_timeout_ms: None,
+        stream_setup_timeout_ms: None,
+        sampling_timeout_ms: None,
         websocket_connect_timeout_ms: None,
         requires_openai_auth: false,
         supports_websockets: false,
@@ -363,7 +383,9 @@ fn test_create_amazon_bedrock_provider() {
             env_http_headers: None,
             request_max_retries: None,
             stream_max_retries: None,
-            stream_idle_timeout_ms: None,
+       stream_idle_timeout_ms: None,
+        stream_setup_timeout_ms: None,
+        sampling_timeout_ms: None,
             websocket_connect_timeout_ms: None,
             requires_openai_auth: false,
             supports_websockets: false,

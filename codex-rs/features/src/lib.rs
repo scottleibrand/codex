@@ -1454,7 +1454,7 @@ pub const FEATURES: &[FeatureSpec] = &[
         id: Feature::UnboundedConnectionRetries,
         key: "unbounded_connection_retries",
         stage: Stage::Stable,
-        default_enabled: true,
+        default_enabled: false,
     },
     FeatureSpec {
         id: Feature::NetworkProxy,

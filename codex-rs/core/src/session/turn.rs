@@ -193,6 +193,7 @@ pub(crate) async fn run_turn(
 
     let mut client_session =
         prewarmed_client_session.unwrap_or_else(|| sess.services.model_client.new_session());
+    let pending_input_tokens = estimate_pending_turn_input(&input);
     // TODO(ccunningham): Pre-turn compaction runs before context updates and the
     // new user message are recorded. Estimate pending incoming items (context
     // diffs/full reinjection + user input) and trigger compaction preemptively
@@ -203,6 +204,7 @@ pub(crate) async fn run_turn(
             &turn_context,
             &mut client_session,
             &cancellation_token,
+            pending_input_tokens,
         )
         .await
     {
@@ -369,6 +371,7 @@ pub(crate) async fn run_turn(
             CompactionReason::ContextLimit,
             CompactionPhase::PreTurn,
             /*candidate*/ None,
+            pending_input_tokens,
         )
         .await?;
         world_state = sess
@@ -688,6 +691,7 @@ pub(crate) async fn run_turn(
                         CompactionReason::ContextLimit,
                         CompactionPhase::MidTurn,
                         candidate,
+                        /*post_compaction_input_tokens*/ 0,
                     )
                     .await;
                     match compacted {
@@ -806,6 +810,7 @@ pub(crate) async fn run_turn(
                                 CompactionReason::ContextLimit,
                                 CompactionPhase::PostTurn,
                                 candidate,
+                                /*post_compaction_input_tokens*/ 0,
                             )
                             .await
                         {
@@ -858,6 +863,7 @@ pub(crate) async fn run_turn(
                     CompactionReason::ContextLimit,
                     CompactionPhase::MidTurn,
                     /*candidate*/ None,
+                    /*post_compaction_input_tokens*/ 0,
                 )
                 .await?;
                 can_drain_pending_input = false;
@@ -984,6 +990,12 @@ pub(crate) async fn run_hooks_and_record_inputs(
         }
     }
     blocked_input && !accepted_user_input
+}
+
+fn estimate_pending_turn_input(input: &[TurnInput]) -> i64 {
+    serde_json::to_string(&turn_user_input(input))
+        .map(|input| i64::try_from(codex_utils_output_truncation::approx_token_count(&input)).unwrap_or(i64::MAX))
+        .unwrap_or(i64::MAX)
 }
 
 fn turn_user_input(input: &[TurnInput]) -> Vec<UserInput> {
@@ -1381,8 +1393,9 @@ async fn run_pre_sampling_compact(
     turn_context: &Arc<TurnContext>,
     client_session: &mut ModelClientSession,
     cancellation_token: &CancellationToken,
+    pending_input_tokens: i64,
 ) -> CodexResult<()> {
-    maybe_run_previous_model_inline_compact(sess, turn_context, client_session, cancellation_token)
+    maybe_run_previous_model_inline_compact(sess, turn_context, client_session, cancellation_token, pending_input_tokens)
         .await?;
     let token_status =
         super::context_window::context_window_token_status(sess.as_ref(), turn_context.as_ref())
@@ -1402,6 +1415,7 @@ async fn run_pre_sampling_compact(
             CompactionReason::ContextLimit,
             CompactionPhase::PreTurn,
             candidate,
+            pending_input_tokens,
         )
         .await?;
     }
@@ -1425,6 +1439,7 @@ async fn maybe_run_previous_model_inline_compact(
     turn_context: &Arc<TurnContext>,
     client_session: &mut ModelClientSession,
     cancellation_token: &CancellationToken,
+    pending_input_tokens: i64,
 ) -> CodexResult<()> {
     let Some(previous_turn_settings) = sess.previous_turn_settings().await else {
         return Ok(());
@@ -1499,6 +1514,7 @@ async fn maybe_run_previous_model_inline_compact(
         reason,
         CompactionPhase::PreTurn,
         /*candidate*/ None,
+        pending_input_tokens,
     )
     .await?;
     Ok(())
@@ -1519,6 +1535,7 @@ async fn run_auto_compact(
     reason: CompactionReason,
     phase: CompactionPhase,
     candidate: Option<Box<BackgroundCompactionCandidate>>,
+    post_compaction_input_tokens: i64,
 ) -> CodexResult<bool> {
     let turn_context = &step_context.turn;
     if matches!(phase, CompactionPhase::PreTurn)
@@ -1587,6 +1604,7 @@ async fn run_auto_compact(
                 phase,
                 candidate,
                 fallback,
+                post_compaction_input_tokens,
             )
             .await?;
             if has_candidate && installed {
@@ -2617,14 +2635,25 @@ fn assign_missing_streamed_response_item_id(
     Session::assign_missing_response_item_id(item);
 }
 
+fn response_event_has_progress(event: &ResponseEvent) -> bool {
+    match event {
+        ResponseEvent::Created { .. }
+        | ResponseEvent::ServerModel(_)
+        | ResponseEvent::ModelVerifications(_)
+        | ResponseEvent::TurnModerationMetadata(_)
+        | ResponseEvent::ServerReasoningIncluded(_)
+        | ResponseEvent::RateLimits(_)
+        | ResponseEvent::ModelsEtag(_) => false,
+        ResponseEvent::OutputTextDelta(delta)
+        | ResponseEvent::ToolCallInputDelta { delta, .. }
+        | ResponseEvent::ReasoningSummaryDelta { delta, .. }
+        | ResponseEvent::ReasoningContentDelta { delta, .. } => !delta.is_empty(),
+        _ => true,
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
-#[instrument(level = "trace",
-    skip_all,
-    fields(
-        turn_id = %step_context.turn.sub_id,
-        model = %step_context.settings.model_info.slug
-    )
-)]
+#[instrument(level = "trace", skip_all, fields(turn_id = %step_context.turn.sub_id, model = %step_context.settings.model_info.slug))]
 async fn try_run_sampling_request(
     tool_runtime: ToolCallRuntime,
     sess: Arc<Session>,
@@ -2712,7 +2741,18 @@ async fn try_run_sampling_request(
     let sampling_timing_guard = turn_context.turn_timing_state.begin_sampling();
     let mut response_completed = false;
     let mut request_token_usage = None;
-    let mut stream = match client_session
+    let attempt_started = tokio::time::Instant::now();
+    let stream_setup_timeout = turn_context.provider.info().stream_setup_timeout();
+    tracing::info!(
+        thread_id = %sess.thread_id,
+        turn_id = %turn_context.sub_id,
+        model = %step_context.settings.model_info.slug,
+        provider = %turn_context.provider.info().name,
+        input_items = prompt.input.len(),
+        setup_timeout_ms = u64::try_from(stream_setup_timeout.as_millis()).unwrap_or(u64::MAX),
+        "starting response stream attempt"
+    );
+    let stream_setup = client_session
         .stream(
             prompt,
             &step_context.settings.model_info,
@@ -2724,9 +2764,14 @@ async fn try_run_sampling_request(
             &inference_trace,
         )
         .instrument(trace_span!("stream_request"))
-        .or_cancel(&cancellation_token)
-        .await?
-    {
+        .or_cancel(&cancellation_token);
+    let stream_setup = match tokio::time::timeout(stream_setup_timeout, stream_setup).await {
+        Ok(setup) => setup?,
+        Err(_) => Err(CodexErr::Stream(format!(
+            "timeout establishing response stream after {stream_setup_timeout:?}"
+        ))),
+    };
+    let mut stream = match stream_setup {
         Ok(stream) => stream,
         Err(error) => {
             if let Some(finish_post_request) = finish_post_request {
@@ -2740,6 +2785,16 @@ async fn try_run_sampling_request(
             return Err(error);
         }
     };
+    let stream_idle_timeout = turn_context.provider.info().stream_idle_timeout();
+    let mut progress_deadline = tokio::time::Instant::now() + stream_idle_timeout;
+    let sampling_deadline = turn_context.provider.info().sampling_timeout()
+        .map(|timeout| tokio::time::Instant::now() + timeout);
+    tracing::info!(
+        thread_id = %sess.thread_id,
+        turn_id = %turn_context.sub_id,
+        setup_elapsed_ms = u64::try_from(attempt_started.elapsed().as_millis()).unwrap_or(u64::MAX),
+        "response stream established"
+    );
     if cancellation_token.is_cancelled() {
         return Err(CodexErr::TurnAborted);
     }
@@ -2792,8 +2847,22 @@ async fn try_run_sampling_request(
             .next()
             .instrument(trace_span!(parent: &handle_responses, "receiving"))
             .or_cancel(&preempt)
-            .or_cancel(&cancellation_token)
-            .await;
+            .or_cancel(&cancellation_token);
+        let deadline = sampling_deadline.map(|deadline| deadline.min(progress_deadline))
+            .unwrap_or(progress_deadline);
+        let event = match tokio::time::timeout_at(deadline, event).await {
+            Ok(event) => event,
+            Err(_) => {
+                tracing::warn!(
+                    thread_id = %sess.thread_id,
+                    turn_id = %turn_context.sub_id,
+                    attempt_elapsed_ms = u64::try_from(attempt_started.elapsed().as_millis()).unwrap_or(u64::MAX),
+                    sampling_deadline_expired = sampling_deadline.is_some_and(|deadline| deadline <= tokio::time::Instant::now()),
+                    "response stream progress deadline expired"
+                );
+                break Err(CodexErr::Stream("response stream sampling or semantic progress deadline exceeded".into()));
+            }
+        };
         // Account for an already-received terminal error even if cancellation raced it.
         // Cancellation still stops ordinary stream events before they can run tools.
         let event = match event {
@@ -2851,6 +2920,10 @@ async fn try_run_sampling_request(
             .session_telemetry
             .record_responses(&handle_responses, &event);
         record_turn_ttft_metric(&turn_context, &event).await;
+
+        if response_event_has_progress(&event) {
+            progress_deadline = tokio::time::Instant::now() + stream_idle_timeout;
+        }
 
         match event {
             ResponseEvent::Created { response_id } => {

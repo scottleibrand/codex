@@ -126,7 +126,7 @@ async fn prepared_prefix_rejection_respects_caller_intent(
         &step,
         &step,
         /*client_session*/ None,
-        &WorldState::default(),
+        &Arc::new(WorldState::default()),
         CompactionTurnMetadata::new(
             CompactionTrigger::Auto,
             CompactionReason::ContextLimit,

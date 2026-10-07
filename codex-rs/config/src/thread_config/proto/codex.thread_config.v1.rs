@@ -69,6 +69,10 @@ pub struct ModelProvider {
     pub stream_max_retries: ::core::option::Option<u64>,
     #[prost(uint64, optional, tag = "14")]
     pub stream_idle_timeout_ms: ::core::option::Option<u64>,
+    #[prost(uint64, optional, tag = "20")]
+    pub stream_setup_timeout_ms: ::core::option::Option<u64>,
+    #[prost(uint64, optional, tag = "21")]
+    pub sampling_timeout_ms: ::core::option::Option<u64>,
     #[prost(uint64, optional, tag = "15")]
     pub websocket_connect_timeout_ms: ::core::option::Option<u64>,
     #[prost(bool, tag = "16")]

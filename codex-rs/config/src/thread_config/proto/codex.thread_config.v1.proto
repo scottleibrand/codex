@@ -50,6 +50,8 @@ message ModelProvider {
   bool supports_websockets = 17;
   bool supports_standalone_web_search = 18;
   optional string model_catalog_url = 19;
+  optional uint64 stream_setup_timeout_ms = 20;
+  optional uint64 sampling_timeout_ms = 21;
 }
 
 message StringMap {

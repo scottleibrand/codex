@@ -81,6 +81,7 @@ impl ToolCallRuntime {
         cancellation_token: CancellationToken,
     ) -> impl std::future::Future<Output = Result<ResponseItemEnvelope, CodexErr>> {
         let error_call = call.clone();
+        let error_session = Arc::clone(&self.session);
         let source = call.direct_source();
         let recorder = self.session.services.executed_tool_calls.clone();
         let recorded_call = recorder.prepare_direct_call(&call, &source, &self.step_context);
@@ -108,6 +109,22 @@ impl ToolCallRuntime {
                 }
                 Err(FunctionCallError::Fatal(message)) => return Err(CodexErr::Fatal(message)),
                 Err(other) => {
+                    if matches!(&other, FunctionCallError::RespondToModel(message) if message.starts_with("failed to parse function arguments:")) {
+                        let history = error_session.clone_history().await;
+                        let occurrences = identical_function_call_count(history.raw_items(), &error_call);
+                        tracing::warn!(
+                            tool_name = %error_call.tool_name,
+                            call_id = %error_call.call_id,
+                            identical_occurrences = occurrences,
+                            "model emitted malformed function arguments"
+                        );
+                        if occurrences >= 3 {
+                            return Err(CodexErr::Fatal(format!(
+                                "model repeatedly emitted identical malformed arguments for tool {} ({occurrences} attempts)",
+                                error_call.tool_name,
+                            )));
+                        }
+                    }
                     ResponseItemEnvelope::new(Self::failure_response(error_call, other).into())
                 }
             };
@@ -330,6 +347,21 @@ impl ToolCallRuntime {
     }
 }
 
+fn identical_function_call_count<'history>(
+    items: impl DoubleEndedIterator<Item = &'history codex_protocol::models::ResponseItem>,
+    call: &ToolCall,
+) -> usize {
+    let ToolPayload::Function { arguments } = &call.payload else {
+        return 0;
+    };
+    items.rev()
+        .take_while(|item| !matches!(item, codex_protocol::models::ResponseItem::Message { role, .. } if role == "user"))
+        .filter(|item| matches!(item,
+            codex_protocol::models::ResponseItem::FunctionCall { name, namespace, arguments: candidate_arguments, .. }
+            if codex_tools::ToolName::new(namespace.clone(), name).with_default_namespace() == call.tool_name && candidate_arguments == arguments))
+        .count()
+}
+
 impl ToolCallRuntime {
     fn tool_task_join_error(err: JoinError) -> FunctionCallError {
         FunctionCallError::Fatal(format!("tool task failed to receive: {err:?}"))
@@ -512,6 +544,37 @@ mod tests {
     use tokio::sync::Notify;
     use tokio::sync::oneshot;
     use tracing_test::internal::MockWriter;
+
+    #[test]
+    fn identical_malformed_call_count_resets_on_user_input_and_ignores_other_calls() {
+        use codex_protocol::models::ResponseItem;
+        let call = ToolCall {
+            tool_name: codex_tools::ToolName::plain("exec_command").with_default_namespace(),
+            call_id: "current".to_string(),
+            payload: ToolPayload::Function { arguments: "{broken".to_string() },
+            encrypted_function_args: None,
+        };
+        let matching = ResponseItem::FunctionCall {
+            id: None,
+            call_id: "previous".to_string(),
+            name: "exec_command".to_string(),
+            namespace: None,
+            arguments: "{broken".to_string(),
+        };
+        let user = ResponseItem::Message {
+            id: None,
+            role: "user".to_string(),
+            content: Vec::new(),
+            phase: None,
+            internal_chat_message_metadata_passthrough: None,
+        };
+        let mut different = matching.clone();
+        if let ResponseItem::FunctionCall { arguments, .. } = &mut different {
+            *arguments = "different".to_string();
+        }
+        let history = vec![matching.clone(), user, matching.clone(), different, matching.clone(), matching];
+        assert_eq!(identical_function_call_count(history.iter(), &call), 3);
+    }
 
     #[test]
     fn tool_call_timing_guard_ignores_code_mode_source() {

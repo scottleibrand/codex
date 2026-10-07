@@ -709,6 +709,54 @@ fn commands_for_exec_policy_falls_back_for_whitespace_shell_script() {
     );
 }
 
+#[test]
+fn commands_for_exec_policy_recursively_parses_plain_shell_wrappers() {
+    let command = vec![
+        "/bin/bash".to_string(),
+        "-lc".to_string(),
+        "/bin/bash -c 'printf ok'".to_string(),
+    ];
+
+    assert_eq!(
+        commands_for_exec_policy(&command),
+        ExecPolicyCommands {
+            commands: vec![vec!["printf".to_string(), "ok".to_string()]],
+            command_origin: ExecPolicyCommandOrigin::Generic,
+        }
+    );
+}
+
+#[test]
+fn commands_for_exec_policy_resolves_nested_relative_program_from_cwd() {
+    let cwd = tempdir().expect("create cwd");
+    let bin_dir = cwd.path().join("bin");
+    fs::create_dir(&bin_dir).expect("create bin");
+    let runner = bin_dir.join("runner");
+    fs::write(&runner, "").expect("create runner");
+    let canonical_runner = fs::canonicalize(&runner).expect("canonicalize runner");
+    let command = vec![
+        "/bin/bash".to_string(),
+        "-c".to_string(),
+        "bin/runner -- task".to_string(),
+    ];
+
+    assert_eq!(
+        commands_for_exec_policy_for_platform(
+            &command,
+            DangerousCommandPlatform::host(),
+            Some(cwd.path()),
+        ),
+        ExecPolicyCommands {
+            commands: vec![vec![
+                canonical_runner.to_string_lossy().into_owned(),
+                "--".to_string(),
+                "task".to_string(),
+            ]],
+            command_origin: ExecPolicyCommandOrigin::Generic,
+        }
+    );
+}
+
 #[tokio::test]
 async fn ignore_user_config_keeps_user_policy_files() -> std::io::Result<()> {
     let temp = tempdir()?;

@@ -23,6 +23,15 @@ use tracing::warn;
 const INITIAL_CONNECTION_RETRY_DELAY: Duration = Duration::from_secs(5);
 const MAX_CONNECTION_RETRY_DELAY: Duration = Duration::from_secs(60);
 
+fn http_retry_delay(attempt: u64, fast_delay: Duration) -> Duration {
+    if attempt <= 1 {
+        return fast_delay;
+    }
+    Duration::from_secs(60).saturating_mul(
+        1_u32.checked_shl(attempt.saturating_sub(2).min(32) as u32).unwrap_or(u32::MAX),
+    )
+}
+
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum ResponsesStreamRequest {
     Sampling,
@@ -89,6 +98,17 @@ pub(crate) async fn handle_response_stream_error(
         return Err(err);
     };
     let retry_after = err.retry_after();
+    let websocket_active = sess.services.model_client.responses_websocket_enabled();
+    let delay = if websocket_active
+        || turn_context.session_source.is_internal()
+        || !matches!(request, ResponsesStreamRequest::Sampling)
+    {
+        delay
+    } else {
+        http_retry_delay(retry_count, delay)
+    };
+    let now = Instant::now();
+    let retry_at = retry_after.map(RetryAfter::deadline).unwrap_or(now).max(now + delay);
 
     if turn_context
         .config
@@ -152,14 +172,13 @@ pub(crate) async fn handle_response_stream_error(
             // happening instead of staring at a seemingly frozen screen.
             sess.notify_stream_error(
                 turn_context,
-                format!("Reconnecting... {retry_count}/{max_retries}"),
+                format!("Reconnecting... {retry_count}/{max_retries} (waiting {}s)", delay.as_secs()),
                 err,
             )
             .await;
         }
         // Use one clock sample so local backoff telemetry retains the selected delay.
         let now = Instant::now();
-        let retry_at = retry_after.map(RetryAfter::deadline).unwrap_or(now + delay);
         let delay = retry_at.saturating_duration_since(now);
         codex_client::record_retry!(retry_count, delay, operation);
         tokio::time::sleep_until(retry_at).await;

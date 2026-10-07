@@ -6,6 +6,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
+use std::time::Instant;
 
 use opentelemetry::context::FutureExt;
 use serde_json::Value as JsonValue;
@@ -84,6 +85,7 @@ impl SessionRuntime {
             return Err(Error::ShuttingDown);
         }
         let cell_id = self.allocate_cell_id()?;
+        tracing::info!(cell_id = %cell_id, "code_mode_cell_start_requested");
         let initial_event = self
             .start_cell(
                 cell_id.clone(),
@@ -95,6 +97,7 @@ impl SessionRuntime {
         Ok(StartedCell {
             cell_id,
             initial_event,
+            observe_started_at: Instant::now(),
         })
     }
 
@@ -111,6 +114,7 @@ impl SessionRuntime {
         cell_id: &CellId,
         observation: impl Into<Observation> + Send,
     ) -> Result<PendingEvent, Error> {
+        tracing::info!(cell_id = %cell_id, "code_mode_observe_started");
         let handle = self
             .inner
             .cells
@@ -120,6 +124,8 @@ impl SessionRuntime {
             .cloned()
             .ok_or_else(|| Error::MissingCell(cell_id.clone()))?;
         Ok(PendingEvent {
+            cell_id: cell_id.clone(),
+            observe_started_at: Instant::now(),
             event: map_actor_event(cell_id.clone(), handle.observe(observation)),
         })
     }
@@ -223,22 +229,29 @@ impl Drop for SessionRuntime {
 pub(crate) struct StartedCell {
     pub(crate) cell_id: CellId,
     initial_event: RuntimeEventFuture,
+    observe_started_at: Instant,
 }
 
 impl StartedCell {
     pub(crate) async fn initial_event(self) -> Result<CellEvent, Error> {
-        self.initial_event.await
+        let result = self.initial_event.await;
+        tracing::info!(cell_id = %self.cell_id, elapsed_ms = u64::try_from(self.observe_started_at.elapsed().as_millis()).unwrap_or(u64::MAX), result_class = cell_event_result_class(&result), "code_mode_initial_observe_resolved");
+        result
     }
 }
 
 /// An admitted observation that has not reached its requested frontier yet.
 pub(crate) struct PendingEvent {
+    cell_id: CellId,
+    observe_started_at: Instant,
     event: RuntimeEventFuture,
 }
 
 impl PendingEvent {
     pub(crate) async fn event(self) -> Result<CellEvent, Error> {
-        self.event.await
+        let result = self.event.await;
+        tracing::info!(cell_id = %self.cell_id, elapsed_ms = u64::try_from(self.observe_started_at.elapsed().as_millis()).unwrap_or(u64::MAX), result_class = cell_event_result_class(&result), "code_mode_observe_resolved");
+        result
     }
 }
 
@@ -257,7 +270,13 @@ impl<D: SessionRuntimeDelegate> CellHost for RuntimeCellHost<D> {
         invocation: CellToolCall,
         cancellation_token: CancellationToken,
     ) -> Result<JsonValue, String> {
-        self.delegate
+        let started_at = Instant::now();
+        let runtime_tool_call_id = invocation.id.clone();
+        let tool_name = invocation.name.name.clone();
+        let tool_namespace = invocation.name.namespace.clone();
+        let tool_kind = invocation.kind;
+        tracing::info!(cell_id = %self.cell_id, %runtime_tool_call_id, tool_name, tool_namespace, ?tool_kind, "code_mode_tool_started");
+        let result = self.delegate
             .invoke_tool(
                 NestedToolCall {
                     cell_id: self.cell_id.clone(),
@@ -269,7 +288,9 @@ impl<D: SessionRuntimeDelegate> CellHost for RuntimeCellHost<D> {
                 cancellation_token,
             )
             .with_context(self.execution_context.clone())
-            .await
+            .await;
+        tracing::info!(cell_id = %self.cell_id, %runtime_tool_call_id, tool_name, tool_namespace, ?tool_kind, elapsed_ms = u64::try_from(started_at.elapsed().as_millis()).unwrap_or(u64::MAX), success = result.is_ok(), "code_mode_tool_finished");
+        result
     }
 
     async fn notify(
@@ -290,27 +311,43 @@ impl<D: SessionRuntimeDelegate> CellHost for RuntimeCellHost<D> {
         pending_initial_yield_items: Option<Vec<OutputItem>>,
         cell_state: Arc<CellState>,
     ) -> CompletionCommit {
+        tracing::info!(cell_id = %self.cell_id, "code_mode_completion_commit_started");
         let cancellation_token = cell_state.cancellation_token();
         let mut stored_values = tokio::select! {
             biased;
             _ = cancellation_token.cancelled() => {
+                tracing::info!(cell_id = %self.cell_id, accepted = false, "code_mode_completion_committed");
                 return CompletionCommit::Rejected(event);
             }
             stored_values = self.inner.stored_values.lock() => stored_values,
         };
-        cell_state.commit_completion(event, pending_initial_yield_items, || {
+        let commit = cell_state.commit_completion(event, pending_initial_yield_items, || {
             stored_values.extend(stored_value_writes);
-        })
+        });
+        tracing::info!(cell_id = %self.cell_id, accepted = matches!(&commit, CompletionCommit::Committed), "code_mode_completion_committed");
+        commit
     }
 
     async fn closed(&self) {
-        self.inner.cells.lock().await.remove(&self.cell_id);
+        tracing::info!(cell_id = %self.cell_id, "code_mode_cell_close_started");
+        let registry_removed = self.inner.cells.lock().await.remove(&self.cell_id).is_some();
         self.delegate.cell_closed(&self.cell_id);
+        tracing::info!(cell_id = %self.cell_id, registry_removed, "code_mode_cell_closed");
     }
 }
 
 fn map_actor_event(cell_id: CellId, event: CellEventFuture) -> RuntimeEventFuture {
     Box::pin(async move { event.await.map_err(|error| actor_error(&cell_id, error)) })
+}
+
+fn cell_event_result_class(result: &Result<CellEvent, Error>) -> &str {
+    match result {
+        Ok(CellEvent::Yielded { .. }) => "yielded",
+        Ok(CellEvent::Pending { .. }) => "pending",
+        Ok(CellEvent::Completed { .. }) => "completed",
+        Ok(CellEvent::Terminated { .. }) => "terminated",
+        Err(_) => "error",
+    }
 }
 
 fn actor_error(cell_id: &CellId, error: CellError) -> Error {
