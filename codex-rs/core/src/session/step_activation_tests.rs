@@ -1250,7 +1250,9 @@ async fn model_safety_rejects_fallback_metadata() {
 #[test_case(None, None, false; "both catalog policies")]
 #[test_case(Some("admitted policy"), None, false; "live config unmasks catalog")]
 #[test_case(None, Some("live policy"), false; "admitted config unmasks catalog")]
-#[test_case(Some("admitted policy"), Some("live policy"), true; "both configured policies mask catalog")]
+// Non-managed configured policies supplement the catalog policy, so a catalog
+// policy change still changes the effective parent-fallback policy.
+#[test_case(Some("admitted policy"), Some("live policy"), false; "both configured policies supplement catalog")]
 #[tokio::test]
 async fn parent_fallback_policy_uses_both_config_lifetimes(
     admitted_policy: Option<&str>,

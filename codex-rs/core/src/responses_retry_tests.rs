@@ -65,6 +65,54 @@ fn http_retry_schedule_preserves_finite_multi_hour_exponential_window() {
     assert!(total > Duration::from_secs(8 * 3600));
 }
 
+/// A permanent status on the WebSocket handshake falls back to HTTPS once, then
+/// the same status is terminal on HTTPS.
+#[tokio::test]
+async fn permanent_websocket_status_falls_back_to_https_once() {
+    let (session, turn_context) = make_session_and_context().await;
+    let step_context = StepContext::for_test(Arc::new(turn_context));
+    let mut client_session = session.services.model_client.new_session();
+    let mut retry_state = ResponsesStreamRetryState::default();
+    let not_found = || {
+        CodexErr::UnexpectedStatus(codex_protocol::error::UnexpectedResponseError {
+            status: http::StatusCode::NOT_FOUND,
+            body: String::new(),
+            user_message: None,
+            url: None,
+            cf_ray: None,
+            request_id: None,
+            identity_authorization_error: None,
+            identity_error_code: None,
+        })
+    };
+    assert!(session.services.model_client.responses_websocket_enabled());
+
+    handle_response_stream_error(
+        &mut retry_state,
+        /*max_retries*/ 1,
+        not_found(),
+        &mut client_session,
+        &session,
+        &step_context,
+        ResponsesStreamRequest::Sampling,
+    )
+    .await
+    .expect("WebSocket rejection should fall back to HTTPS");
+    assert!(!session.services.model_client.responses_websocket_enabled());
+
+    let terminal = handle_response_stream_error(
+        &mut retry_state,
+        /*max_retries*/ 1,
+        not_found(),
+        &mut client_session,
+        &session,
+        &step_context,
+        ResponsesStreamRequest::Sampling,
+    )
+    .await;
+    assert!(terminal.is_err(), "HTTPS 404 must remain permanent");
+}
+
 /// Time spent reporting a retry must count toward the server's original deadline.
 #[tokio::test]
 #[expect(

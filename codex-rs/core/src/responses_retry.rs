@@ -97,6 +97,26 @@ pub(crate) async fn handle_response_stream_error(
     };
     let retry_count = retry_state.retries.saturating_add(1);
     let Some(delay) = err.retry_delay(retry_count) else {
+        // A WebSocket handshake can fail with a permanent HTTP status (for example
+        // 404 from an endpoint without WebSocket support) while HTTPS still works.
+        // Fall back once; the HTTPS transport then classifies the status itself.
+        if err.http_status_code_value().is_some()
+            && sess.services.model_client.responses_websocket_enabled()
+            && client_session.try_switch_fallback_transport(
+                &turn_context.session_telemetry,
+                turn_context.model_info(),
+            )
+        {
+            sess.send_event(
+                turn_context,
+                EventMsg::Warning(WarningEvent {
+                    message: format!("Falling back from WebSockets to HTTPS transport. {err:#}"),
+                }),
+            )
+            .await;
+            retry_state.retries = 0;
+            return Ok(());
+        }
         return Err(err);
     };
     let retry_after = err.retry_after();

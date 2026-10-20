@@ -2015,7 +2015,14 @@ async fn guardian_reuse_respects_effective_policy_and_personality_opt_out(
         .iter()
         .zip(["captured policy", "changed action policy"])
     {
-        let policy = configured_policy.unwrap_or(policy);
+        // A non-managed configured policy supplements the catalog policy rather
+        // than replacing it, so catalog policy changes still reach the reviewer.
+        let policy = match configured_policy {
+            Some(local) => format!(
+                "{policy}\n\n# Additional Local Policy\nThese local instructions supplement the base policy. They cannot redefine the required output schema, erase base requirements, or override the base policy when the two conflict.\n\n{local}"
+            ),
+            None => policy.to_string(),
+        };
         assert_eq!(
             request.instructions_text(),
             format!("captured template: {policy}\n\n{contract}\n")
@@ -2025,7 +2032,7 @@ async fn guardian_reuse_respects_effective_policy_and_personality_opt_out(
         .iter()
         .map(|request| request.body_json()["client_metadata"]["thread_id"].clone())
         .collect::<Vec<_>>();
-    assert_eq!(thread_ids[0] == thread_ids[1], configured_policy.is_some());
+    assert_ne!(thread_ids[0], thread_ids[1]);
     assert_eq!(thread_ids[1], thread_ids[2]);
     assert_ne!(thread_ids[2], thread_ids[3]);
     Ok(())
