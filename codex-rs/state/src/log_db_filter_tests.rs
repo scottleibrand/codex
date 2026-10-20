@@ -6,6 +6,66 @@ use uuid::Uuid;
 
 use super::*;
 
+#[test]
+fn default_filter_caps_high_volume_targets_and_keeps_warnings() {
+    use tracing::Level;
+
+    let filter = filter_with_overrides(None);
+    let cases = [
+        ("codex_core::exec_policy", Level::DEBUG),
+        ("codex_core::exec_policy::executable_identity", Level::DEBUG),
+        ("codex_app_server::outgoing_message", Level::DEBUG),
+        ("codex_core::stream_events_utils", Level::INFO),
+        ("codex_core::session::handlers", Level::INFO),
+        ("codex_http_client::client", Level::INFO),
+    ];
+    for (target, most_verbose) in cases {
+        for level in [
+            Level::ERROR,
+            Level::WARN,
+            Level::INFO,
+            Level::DEBUG,
+            Level::TRACE,
+        ] {
+            assert_eq!(
+                filter.would_enable(target, &level),
+                level <= most_verbose,
+                "{target} at {level}"
+            );
+        }
+    }
+    // Neighbouring targets keep their previous levels.
+    assert!(filter.would_enable("codex_core::session::turn", &Level::TRACE));
+    assert!(filter.would_enable("codex_core::client", &Level::TRACE));
+    assert!(filter.would_enable("codex_app_server::message_processor", &Level::TRACE));
+    assert!(filter.would_enable("codex_http_client::transport", &Level::DEBUG));
+    assert!(!filter.would_enable("codex_http_client::transport", &Level::TRACE));
+}
+
+#[test]
+fn log_db_filter_overrides_replace_builtin_levels() {
+    use tracing::Level;
+
+    let filter = filter_with_overrides(Some(
+        "codex_core::exec_policy=trace,codex_core::session::turn=warn",
+    ));
+    assert!(filter.would_enable("codex_core::exec_policy", &Level::TRACE));
+    assert!(!filter.would_enable("codex_core::session::turn", &Level::INFO));
+    assert!(filter.would_enable("codex_core::session::turn", &Level::WARN));
+    assert!(!filter.would_enable("codex_http_client::client", &Level::DEBUG));
+
+    let filter = filter_with_overrides(Some("info"));
+    assert!(!filter.would_enable("codex_state", &Level::DEBUG));
+    assert!(filter.would_enable("codex_state", &Level::INFO));
+    assert!(!filter.would_enable("sqlx::query", &Level::ERROR));
+
+    for invalid in ["", "   ", "codex_core=verbose"] {
+        let filter = filter_with_overrides(Some(invalid));
+        assert!(filter.would_enable("codex_state", &Level::TRACE), "{invalid:?}");
+        assert!(!filter.would_enable("codex_core::exec_policy", &Level::TRACE));
+    }
+}
+
 #[tokio::test]
 async fn sqlite_sink_filters_noisy_targets_without_dropping_useful_diagnostics() {
     let codex_home =
@@ -93,6 +153,10 @@ async fn sqlite_sink_filters_noisy_targets_without_dropping_useful_diagnostics()
         payload = "complete timing payload",
         "dropped-websocket-timing"
     );
+    tracing::trace!(target: "codex_core::exec_policy", "dropped-exec-policy-trace");
+    tracing::debug!(target: "codex_core::exec_policy", "retained-exec-policy-debug");
+    tracing::debug!(target: "codex_http_client::client", "dropped-http-client-debug");
+    tracing::warn!(target: "codex_http_client::client", "retained-http-client-warning");
 
     layer.flush().await;
     drop(guard);
@@ -168,6 +232,16 @@ async fn sqlite_sink_filters_noisy_targets_without_dropping_useful_diagnostics()
                 "TRACE",
                 "codex_tui::streaming::commit_tick",
                 Some("retained-commit-tick-trace"),
+            ),
+            (
+                "DEBUG",
+                "codex_core::exec_policy",
+                Some("retained-exec-policy-debug"),
+            ),
+            (
+                "WARN",
+                "codex_http_client::client",
+                Some("retained-http-client-warning"),
             ),
         ]
     );

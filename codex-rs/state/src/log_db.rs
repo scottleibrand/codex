@@ -58,7 +58,39 @@ const LOG_BATCH_SIZE: usize = 512;
 const LOG_FLUSH_INTERVAL: Duration = Duration::from_secs(10);
 const SQLX_LOG_TARGETS: [&str; 3] = ["sqlx", "sqlx_core", "sqlx_sqlite"];
 
+/// Environment variable with comma-separated `target=level` directives (and an
+/// optional bare default level) applied on top of the built-in SQLite log filter,
+/// for example `codex_core::exec_policy=trace,codex_app_server=info`.
+/// Invalid values are ignored so a typo cannot disable logging.
+pub const LOG_DB_FILTER_ENV_VAR: &str = "CODEX_LOG_DB_FILTER";
+
+/// Filter for the SQLite log sink: the built-in defaults plus any
+/// [`LOG_DB_FILTER_ENV_VAR`] overrides.
 pub fn default_filter() -> Targets {
+    filter_with_overrides(std::env::var(LOG_DB_FILTER_ENV_VAR).ok().as_deref())
+}
+
+fn filter_with_overrides(overrides: Option<&str>) -> Targets {
+    let filter = builtin_filter();
+    let Some(overrides) = overrides.map(str::trim).filter(|value| !value.is_empty()) else {
+        return filter;
+    };
+    match overrides.parse::<Targets>() {
+        Ok(overrides) => {
+            let filter = match overrides.default_level() {
+                Some(level) => filter.with_default(level),
+                None => filter,
+            };
+            filter.with_targets(overrides)
+        }
+        Err(error) => {
+            tracing::warn!(%error, "ignoring invalid {LOG_DB_FILTER_ENV_VAR}");
+            filter
+        }
+    }
+}
+
+fn builtin_filter() -> Targets {
     Targets::new()
         .with_default(LevelFilter::TRACE)
         .with_target("h2", LevelFilter::WARN)
@@ -87,6 +119,13 @@ pub fn default_filter() -> Targets {
         // Per-chunk streaming traces otherwise flood the bounded SQLite log queue.
         .with_target("codex_tui::streaming::controller", LevelFilter::DEBUG)
         .with_target("codex_tui::streaming::table_holdback", LevelFilter::DEBUG)
+        // High-volume per-command and per-message payload logs dominate the
+        // database; keep their summaries and every warning or error.
+        .with_target("codex_core::exec_policy", LevelFilter::DEBUG)
+        .with_target("codex_app_server::outgoing_message", LevelFilter::DEBUG)
+        .with_target("codex_core::stream_events_utils", LevelFilter::INFO)
+        .with_target("codex_core::session::handlers", LevelFilter::INFO)
+        .with_target("codex_http_client::client", LevelFilter::INFO)
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
