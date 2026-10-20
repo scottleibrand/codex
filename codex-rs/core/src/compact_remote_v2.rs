@@ -126,7 +126,8 @@ pub(crate) async fn run_inline_remote_auto_compact_task(
         reason,
         CompactionImplementation::ResponsesCompactionV2,
         phase,
-    ).with_post_compaction_input_tokens(post_compaction_input_tokens);
+    )
+    .with_post_compaction_input_tokens(post_compaction_input_tokens);
     run_remote_compact_task_inner(
         &sess,
         &step_context,
@@ -279,8 +280,13 @@ async fn run_remote_compact_task_inner(
 }
 
 /// Whether an installed replacement history would leave too little room for the next request.
-fn insufficient_post_compaction_headroom(estimated_tokens: i64, context_window: Option<i64>) -> bool {
-    context_window.is_some_and(|window| estimated_tokens > window.saturating_sub((window / 4).clamp(1, 64_000)))
+fn insufficient_post_compaction_headroom(
+    estimated_tokens: i64,
+    context_window: Option<i64>,
+) -> bool {
+    context_window.is_some_and(|window| {
+        estimated_tokens > window.saturating_sub((window / 4).clamp(1, 64_000))
+    })
 }
 
 pub(crate) fn omit_historical_input_images(items: &mut [ResponseItem]) {
@@ -802,9 +808,18 @@ mod tests {
 
     #[test]
     fn post_compaction_guard_reserves_headroom_without_inventing_unknown_limits() {
-        assert!(!insufficient_post_compaction_headroom(192_000, Some(256_000)));
-        assert!(insufficient_post_compaction_headroom(192_001, Some(256_000)));
-        assert!(!insufficient_post_compaction_headroom(75_000, Some(100_000)));
+        assert!(!insufficient_post_compaction_headroom(
+            192_000,
+            Some(256_000)
+        ));
+        assert!(insufficient_post_compaction_headroom(
+            192_001,
+            Some(256_000)
+        ));
+        assert!(!insufficient_post_compaction_headroom(
+            75_000,
+            Some(100_000)
+        ));
         assert!(insufficient_post_compaction_headroom(75_001, Some(100_000)));
         assert!(!insufficient_post_compaction_headroom(i64::MAX, None));
     }
@@ -816,15 +831,24 @@ mod tests {
             panic!("expected message");
         };
         content.push(ContentItem::InputImage {
-            image: codex_protocol::models::ImageReference::Inline { image_url: "data:image/png;base64,test".to_string() },
+            image: codex_protocol::models::ImageReference::Inline {
+                image_url: "data:image/png;base64,test".to_string(),
+            },
             detail: None,
         });
         omit_historical_input_images(&mut history);
         let ResponseItem::Message { content, .. } = &history[0] else {
             panic!("expected message");
         };
-        assert_eq!(content[0], ContentItem::InputText { text: "preserved".to_string() });
-        assert!(matches!(&content[1], ContentItem::InputText { text } if text.contains("Image omitted")));
+        assert_eq!(
+            content[0],
+            ContentItem::InputText {
+                text: "preserved".to_string()
+            }
+        );
+        assert!(
+            matches!(&content[1], ContentItem::InputText { text } if text.contains("Image omitted"))
+        );
     }
 
     fn message(role: &str, text: &str, phase: Option<MessagePhase>) -> ResponseItem {

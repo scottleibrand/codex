@@ -348,9 +348,8 @@ async fn estimated_replacement_request_tokens(
             .as_ref(),
     )
     .map_or(i64::MAX, |tools| token_count(&tools));
-    let reference_tokens =
-        serde_json::to_string(&replacement_step_context.to_turn_context_item())
-            .map_or(i64::MAX, |context| token_count(&context));
+    let reference_tokens = serde_json::to_string(&replacement_step_context.to_turn_context_item())
+        .map_or(i64::MAX, |context| token_count(&context));
     new_history
         .iter()
         .map(|envelope| estimate_item_token_count(&envelope.item))
@@ -371,8 +370,13 @@ async fn reviewer_compaction_hash(sess: &Session, turn_context: &TurnContext) ->
         // reviewer, including model changes accepted while compaction was running.
         let mut review_context = crate::guardian::GuardianReviewContext::from(&review_turn);
         review_context.model_info = review_turn.capture_current_model_info();
-        let (_, reviewer) = crate::guardian::resolve_review_model(sess, &review_context).await;
-        reviewer.comp_hash.clone()
+        match crate::guardian::resolve_review_model(sess, &review_context).await {
+            Ok((_, reviewer)) => reviewer.comp_hash.clone(),
+            Err(error) => {
+                tracing::warn!(%error, "reviewer checkpoint compatibility could not be resolved");
+                None
+            }
+        }
     } else {
         None
     }

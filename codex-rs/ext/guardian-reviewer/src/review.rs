@@ -26,7 +26,6 @@ use std::sync::atomic::AtomicI64;
 use std::sync::atomic::Ordering;
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
-use tracing::Instrument;
 
 /// Operations bound to one immutable action and its issuing context.
 /// Hosts validate authority, publish supplied events and interrupt only the selected turn;
@@ -244,7 +243,7 @@ impl<H: ReviewHost> SynchronousApprovalReviewer for ReviewRequest<'_, H> {
                 }
             }
             completed.decision
-        }.instrument(tracing::info_span!("guardian_review", approval_id = self.approval_id, tool_call_id = self.tool_call_id, thread_id = %self.thread_id)))
+        })
     }
 }
 

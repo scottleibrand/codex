@@ -85,7 +85,8 @@ async fn transient_rate_limit_retry_uses_only_final_attempt_evidence() {
             max_attempts: 3,
             deadline: Instant::now() + Duration::from_secs(90),
         },
-        None,
+        /*external_cancel*/ None,
+        /*telemetry*/ None,
         |_deadline| {
             attempts += 1;
             let attempt = attempts;
@@ -127,7 +128,8 @@ async fn transient_review_exhaustion_stops_after_three_total_attempts() {
             max_attempts: 3,
             deadline: Instant::now() + Duration::from_secs(90),
         },
-        None,
+        /*external_cancel*/ None,
+        /*telemetry*/ None,
         |_deadline| {
             attempts += 1;
             async {
@@ -154,22 +156,34 @@ async fn transient_review_exhaustion_stops_after_three_total_attempts() {
 
 #[tokio::test]
 async fn provider_retry_deadline_is_not_bypassed_or_extended() {
+    let outcome = GuardianReviewOutcome::Error(GuardianReviewError::session_with_error_info(
+        anyhow::anyhow!("temporary rate limit"),
+        CodexErrorInfo::RateLimitExceeded,
+    ));
     let not_before = Instant::now() + Duration::from_millis(400);
     assert!(
         wait_before_guardian_retry(
-            1,
+            /*attempt_count*/ 1,
+            /*max_attempts*/ 3,
+            &outcome,
             Some(not_before),
             Instant::now() + Duration::from_secs(2),
-            None
+            /*external_cancel*/ None,
         )
         .await
         .is_none()
     );
     assert!(Instant::now() >= not_before);
     let deadline = Instant::now() + Duration::from_millis(20);
-    let result =
-        wait_before_guardian_retry(1, Some(deadline + Duration::from_secs(2)), deadline, None)
-            .await;
+    let result = wait_before_guardian_retry(
+        /*attempt_count*/ 1,
+        /*max_attempts*/ 3,
+        &outcome,
+        Some(deadline + Duration::from_secs(2)),
+        deadline,
+        /*external_cancel*/ None,
+    )
+    .await;
     assert!(matches!(result, Some(GuardianReviewError::Timeout)));
 }
 

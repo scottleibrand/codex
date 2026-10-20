@@ -559,6 +559,8 @@ mod tests {
             encrypted_function_args: None,
         };
         let matching = ResponseItem::FunctionCall {
+            status: None,
+            encrypted_content: None,
             id: None,
             call_id: "previous".to_string(),
             name: "exec_command".to_string(),
@@ -568,6 +570,8 @@ mod tests {
             internal_chat_message_metadata_passthrough: None,
         };
         let user = ResponseItem::Message {
+            status: None,
+            encrypted_content: None,
             id: None,
             role: "user".to_string(),
             content: Vec::new(),

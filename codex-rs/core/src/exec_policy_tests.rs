@@ -2597,6 +2597,7 @@ async fn windows_powershell_policy_classifies_only_independent_literal_commands(
                         },
                         &shell,
                         DangerousCommandPlatform::Windows,
+                        /*cwd*/ None,
                     )
                     .await;
                 let actual = match requirement {
