@@ -61,7 +61,10 @@ fn log_db_filter_overrides_replace_builtin_levels() {
 
     for invalid in ["", "   ", "codex_core=verbose"] {
         let filter = filter_with_overrides(Some(invalid));
-        assert!(filter.would_enable("codex_state", &Level::TRACE), "{invalid:?}");
+        assert!(
+            filter.would_enable("codex_state", &Level::TRACE),
+            "{invalid:?}"
+        );
         assert!(!filter.would_enable("codex_core::exec_policy", &Level::TRACE));
     }
 }
